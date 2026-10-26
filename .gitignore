@@ -1,0 +1,31 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Build artifacts
+*.egg-info/
+build/
+dist/
+
+# Local environment variables
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+mock_test/
+
+# Local development notes
+/BACKLOG.md
+/docs/
+/engineering/
+/prompt/
+/ux/

@@ -1,0 +1,21 @@
+[project]
+name = "vin"
+version = "0.1.0"
+requires-python = ">=3.14.3"
+dependencies = [
+    "aisuite>=0.2.0",
+    "openai>=3.29.0",
+    "prompt-toolkit>=3.0.53",
+    "pyjwt[crypto]>=2.15.1",
+    "rich>=15.0.0",
+]
+[project.scripts]
+vin = "vin.main:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["vin", "vin.*"]
