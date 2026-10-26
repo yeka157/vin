@@ -2,7 +2,27 @@
 
 Vin is a terminal coding assistant that can explore a project, explain code, edit files, and run commands. Sign in with ChatGPT, choose a model, and describe what you want to do.
 
+![Vin reading a project and summarizing its structure](assets/demo.gif)
+
 Vin is in early development. Development and manual testing currently take place on macOS. Linux has not been verified, and Windows is not supported.
+
+> [!WARNING]
+> Vin edits files and runs Bash commands without asking first. Commands run with your operating-system permissions and can reach paths outside the project folder. Start Vin in a repository with a clean `git status` so you can review its changes with `git diff` and undo them with `git restore`.
+
+## How it works
+
+Vin signs in with your ChatGPT account through the browser (OAuth with PKCE), so it needs no OpenAI API key. Each message you send starts a loop: Vin sends the conversation to the model, the model can call tools, Vin runs them and returns the results, and the loop repeats until the model answers in text. One message allows up to 16 model requests and up to 8 tool calls per request.
+
+The model has four tools:
+
+| Tool | What it does |
+| --- | --- |
+| `read` | Read a file, 200 lines at a time by default |
+| `write` | Create or overwrite a file |
+| `edit` | Replace an exact piece of text in a file |
+| `bash` | Run a shell command, with a 30-second default timeout |
+
+`read`, `write` and `edit` only accept paths inside the folder where you launched Vin. `bash` has no such limit.
 
 ## Install
 
@@ -53,8 +73,6 @@ Describe your goal in ordinary language. For example:
 > Fix the failing tests and explain what changed.
 
 Vin shows its progress and tool activity as it works. Completed tool groups collapse into a summary; click the summary to expand it, and click again to close it. File edits include a diff.
-
-Vin can edit files and run Bash commands without an approval prompt. Bash runs with your operating-system permissions and can access paths outside the project folder.
 
 ## Commands
 
