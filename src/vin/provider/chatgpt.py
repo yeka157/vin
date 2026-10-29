@@ -8,20 +8,40 @@ from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Literal, Protocol, cast, overload, runtime_checkable
 
 from vin.types import History, ModelMetadata, is_record, is_list, json_value
-from vin.provider.events import EventSender, ReplyEvent, TextEventKind, ToolEventKind, ToolStarted, TokenUsage
+from vin.provider.events import (
+    EventSender,
+    ReplyEvent,
+    TextEventKind,
+    ToolEventKind,
+    ToolStarted,
+    TokenUsage,
+)
 import re
 
 if TYPE_CHECKING:
     from http.client import HTTPResponse
-    from openai.types.responses import Response, ResponseOutputItem, ResponseStreamEvent, FunctionToolParam, ResponseIncludable
+    from openai.types.responses import (
+        Response,
+        ResponseOutputItem,
+        ResponseStreamEvent,
+        FunctionToolParam,
+        ResponseIncludable,
+    )
     from openai.types.shared_params import Reasoning
 
 
 class WireResponses(Protocol):
     def create(
-        self, *, model: str, input: History, instructions: str,
-        tools: list["FunctionToolParam"], reasoning: "Reasoning",
-        include: list["ResponseIncludable"], store: bool, stream: Literal[True],
+        self,
+        *,
+        model: str,
+        input: History,
+        instructions: str,
+        tools: list["FunctionToolParam"],
+        reasoning: "Reasoning",
+        include: list["ResponseIncludable"],
+        store: bool,
+        stream: Literal[True],
     ) -> AbstractContextManager[Iterable["ResponseStreamEvent"]]: ...
 
 
@@ -241,7 +261,10 @@ def _request_response(
             if cancel_event.is_set():
                 return None
 
-            if event.type == "response.output_text.delta" or event.type == "response.refusal.delta":
+            if (
+                event.type == "response.output_text.delta"
+                or event.type == "response.refusal.delta"
+            ):
                 if event.delta:
                     streamed_text.append(event.delta)
                     send("text", event.delta)
@@ -313,6 +336,14 @@ def _request_response(
                 )
 
     raise _AgentError("ChatGPT stream ended before completion.")
+
+
+def context_after_compaction(history: History) -> History:
+    for index in range(len(history) - 1, -1, -1):
+        item = history[index]
+        if item.get("type") == "compaction":
+            return history[index:]
+    return history.copy()
 
 
 def _run_agent_turn(
@@ -391,7 +422,13 @@ def _run_agent_turn(
     raise _AgentError("Model request limit exceeded: maximum 16.")
 
 
-def stream_chatgpt_response(credentials: object, model: object, messages: History, events: SimpleQueue[ReplyEvent], cancel_event: Event) -> None:
+def stream_chatgpt_response(
+    credentials: object,
+    model: object,
+    messages: History,
+    events: SimpleQueue[ReplyEvent],
+    cancel_event: Event,
+) -> None:
     """Run on a worker thread; publish text, complete, or error queue events."""
 
     @overload
@@ -402,14 +439,19 @@ def stream_chatgpt_response(credentials: object, model: object, messages: Histor
     def send(kind: Literal["usage"], value: TokenUsage) -> None: ...
     @overload
     def send(kind: Literal["complete"], value: History | None) -> None: ...
-    def send(kind: TextEventKind | ToolEventKind | Literal["usage", "complete"], value: str | ToolStarted | TokenUsage | History | None = None) -> None:
+    def send(
+        kind: TextEventKind | ToolEventKind | Literal["usage", "complete"],
+        value: str | ToolStarted | TokenUsage | History | None = None,
+    ) -> None:
         if kind == "tool_started":
             marker = cast(object, getattr(events, "tools_used", None))
             if isinstance(marker, SetMarker):
                 marker.set()
         if cancel_event.is_set():
             return
-        if kind in ("text", "tool_diff", "error", "rate_limit") and isinstance(value, str):
+        if kind in ("text", "tool_diff", "error", "rate_limit") and isinstance(
+            value, str
+        ):
             events.put((kind, value))
         elif kind in ("tool_started", "tool_finished", "tool_failed"):
             if isinstance(value, str):
@@ -441,7 +483,9 @@ def stream_chatgpt_response(credentials: object, model: object, messages: Histor
 
     import openai
 
-    outcome: tuple[Literal["error", "rate_limit"], str] | tuple[Literal["complete"], History] = ("error", "ChatGPT stream ended before completion.")
+    outcome: (
+        tuple[Literal["error", "rate_limit"], str] | tuple[Literal["complete"], History]
+    ) = ("error", "ChatGPT stream ended before completion.")
 
     try:
         with openai.OpenAI(
@@ -450,7 +494,9 @@ def stream_chatgpt_response(credentials: object, model: object, messages: Histor
             timeout=60,
             max_retries=0,
         ) as client:
-            history = _run_agent_turn(_wire_client(client), model, messages, send, cancel_event)
+            history = _run_agent_turn(
+                _wire_client(client), model, messages, send, cancel_event
+            )
             if history is None:
                 return
             outcome = ("complete", history)
