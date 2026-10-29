@@ -829,6 +829,7 @@ class VinApp:
             self.last_session_checkpoint = None
             self.session_save_error = None
             self.messages = []
+            self.last_usage = None
             self.transcript.clear()
             self.transcript_control.scroll_to_bottom()
             self.transcript.append(

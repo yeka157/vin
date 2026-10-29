@@ -14,8 +14,9 @@ from rich.text import Text
 from vin.sessions import storage
 from vin.sessions.records import new_session, snapshot_session
 from vin.sessions.transcript import encode_transcript
-from vin.tui import app
+from vin.tui import app, conversations
 from vin.tui.app import VinApp
+from vin.provider.events import TokenUsage
 from vin.types import ActiveTurn, Credentials, History, SessionRecord, TranscriptEntry
 from session_typing_helpers import present, string_value, text_value
 
@@ -34,6 +35,9 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         self.owner.project_dir = self.project
         self.owner.session_record = new_session(self.project, "Current conversation")
         self.owner.messages = [{"role": "user", "content": "Keep current context"}]
+        self.owner.last_usage = {
+            "input_tokens": 1200, "output_tokens": 100, "total_tokens": 1300,
+        }
         self.owner.transcript = [{"role": "assistant", "content": "Keep display"}]
         self.owner.last_session_checkpoint = 10.0
         self.owner.session_save_error = "Previous save warning"
@@ -45,12 +49,13 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         picker.start()
         self.addCleanup(picker.stop)
 
-    def current_state(self) -> tuple[SessionRecord | None, SessionRecord | None, History, list[TranscriptEntry], ActiveTurn | None, float | None, str | None, str, int]:
+    def current_state(self) -> tuple[SessionRecord | None, SessionRecord | None, History, list[TranscriptEntry], ActiveTurn | None, float | None, str | None, str, int, TokenUsage | None]:
         return deepcopy((
             self.owner.session_record, self.owner.saved_session_record,
             self.owner.messages, self.owner.transcript, self.owner.active_turn,
             self.owner.last_session_checkpoint, self.owner.session_save_error,
             self.buffer.text, self.buffer.cursor_position,
+            self.owner.last_usage,
         ))
 
     async def resume(self, query: str = "") -> str | None:
@@ -167,6 +172,7 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
             await self.resume()
 
         self.assertEqual(self.owner.messages, record["messages"])
+        self.assertIsNone(self.owner.last_usage)
         self.assertEqual(encode_transcript(self.owner.transcript), record["transcript"])
         self.assertIsInstance(self.owner.transcript[1]["content"], Text)
         self.assertEqual(self.owner.session_record, record)
@@ -238,6 +244,20 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(RuntimeError, "No saved conversation matches"):
                     await self.resume(query)
                 self.assertEqual(self.current_state(), before)
+
+    async def test_unavailable_or_unrestorable_session_preserves_current_usage(self) -> None:
+        record = self.save_restorable_record()
+        before = self.current_state()
+
+        with patch.object(conversations, "load_session", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "no longer available"):
+                await self.resume(record["id"])
+        self.assertEqual(self.current_state(), before)
+
+        with patch.object(conversations, "restore_session", side_effect=ValueError("Invalid saved context")):
+            with self.assertRaisesRegex(ValueError, "Invalid saved context"):
+                await self.resume(record["id"])
+        self.assertEqual(self.current_state(), before)
 
     async def test_duplicate_title_reports_ambiguity_but_full_id_selects_the_right_session(self) -> None:
         first = self.save_restorable_record()

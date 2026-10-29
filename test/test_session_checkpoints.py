@@ -278,12 +278,17 @@ class SessionPromptCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(storage.list_sessions(self.project)), 2)
 
     async def test_commands_alone_do_not_create_a_saved_conversation(self) -> None:
+        self.owner.last_usage = {
+            "input_tokens": 1200, "output_tokens": 100, "total_tokens": 1300,
+        }
+
         async def unexpected_reply(text: str) -> None:
             self.fail(f"A command started a reply: {text}")
 
         self.assertEqual(await self.run_prompts(["/clear", "/quit"], unexpected_reply), "/quit")
         self.assertFalse(self.destination.exists())
         self.assertIsNone(self.owner.session_record)
+        self.assertIsNone(self.owner.last_usage)
 
 
     async def test_resume_arguments_reach_lookup_and_preserve_full_title_before_followup(self) -> None:

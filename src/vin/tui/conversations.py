@@ -70,8 +70,7 @@ async def resume_conversation(owner: "VinApp", query: str | None = None) -> str 
             raise RuntimeError(f"No saved conversation matches: {query}")
         if len(matches) > 1:
             raise RuntimeError(
-                "Multiple conversations have this title. "
-                "Use /resume to choose one."
+                "Multiple conversations have this title. " "Use /resume to choose one."
             )
         selected_id = matches[0]["id"]
     else:
@@ -102,6 +101,7 @@ async def resume_conversation(owner: "VinApp", query: str | None = None) -> str 
     messages, transcript = restore_session(record, owner.project_dir)
 
     owner.messages = messages
+    owner.last_usage = None
     owner.transcript = transcript
     owner.session_record = deepcopy(record)
     owner.saved_session_record = deepcopy(record)
