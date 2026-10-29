@@ -434,6 +434,31 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(await self.run_turn([("text", "Done"), ("complete", None)]))
                 self.assertEqual(self.request_thresholds, [expected])
 
+    async def test_unknown_limit_warns_once_without_blocking_or_polluting_chat(self) -> None:
+        notice = "Automatic compaction is off because this model's context limit is unknown."
+        for window in (None, 500000):
+            with self.subTest(window=window):
+                self.prepare_conversation()
+                model: ModelMetadata = {"slug": "chosen", "display_name": "Chosen"}
+                if window is not None:
+                    model["context_window"] = window
+                self.owner.models = [model]
+                self.owner.selected_model = "chosen"
+
+                for _ in range(2):
+                    self.assertIsNone(await self.run_turn([("text", "Done"), ("complete", None)]))
+
+                expected_count = 1 if window is None else 0
+                self.assertEqual(sum(entry["role"] == "notice" and entry["content"] == notice
+                                     for entry in self.owner.transcript), expected_count)
+                self.assertEqual(self.request_thresholds, [None, None] if window is None else [400000, 400000])
+                self.assertEqual(self.owner.messages, self.previous + [
+                    {"role": "user", "content": self.prompt},
+                    {"role": "assistant", "content": "Done"},
+                ] * 2)
+                self.assertEqual(sum(entry["role"] == "notice" and entry["content"] == notice
+                                     for entry in self.saved()["transcript"]), expected_count)
+
     async def test_latest_response_usage_is_retained_without_changing_conversation(self) -> None:
         self.assertIsNone(self.owner.last_usage)
         first: TokenUsage = {

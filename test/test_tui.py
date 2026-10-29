@@ -188,6 +188,9 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
         self.owner = vin.VinApp()
         self.owner.credentials = fixture_credentials("fake-access-token")
         self.owner.selected_model = "selected-model"
+        self.owner.models = [{
+            "slug": "selected-model", "display_name": "Selected Model", "context_window": 500000,
+        }]
         self.owner.messages = [
             {"role": "user", "content": "Earlier question"},
             {"role": "assistant", "content": "Earlier answer"},
@@ -226,7 +229,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
         seen: list[tuple[int, Credentials | None, str | None, History, Event]] = []
         ui_thread = get_ident()
 
-        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None) -> None:
             seen.append((get_ident(), credentials, model, messages, cancel_event))
             events.put(("text", "**Hel"))
             release.wait(2)
@@ -289,7 +292,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
                 cancel_events: list[Event] = []
                 assert kind == "error" or kind == "rate_limit"
 
-                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, event_kind: Literal["error", "rate_limit"] = kind) -> None:
+                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, event_kind: Literal["error", "rate_limit"] = kind, *, compact_threshold: int | None = None) -> None:
                     cancel_events.append(cancel_event)
                     if partial:
                         events.put(("text", partial))
@@ -327,7 +330,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
         old_release, new_release, old_finished = Event(), Event(), Event()
         seen: list[tuple[ReplyEvents, Event]] = []
 
-        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None) -> None:
             seen.append((events, cancel_event))
             if len(seen) == 1:
                 try:

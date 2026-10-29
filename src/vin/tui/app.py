@@ -384,6 +384,17 @@ class VinApp:
                         compact_threshold = window * 4 // 5
                     break
 
+            if compact_threshold is None and self.selected_model is not None:
+                notice = (
+                    "Automatic compaction is off because this model's "
+                    "context limit is unknown."
+                )
+                if not any(
+                    row["role"] == "notice" and row["content"] == notice
+                    for row in self.transcript
+                ):
+                    self.transcript.append({"role": "notice", "content": notice})
+
             Thread(
                 target=stream_chatgpt_response,
                 args=(
