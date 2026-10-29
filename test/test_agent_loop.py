@@ -193,6 +193,59 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assertIn(('tool_started', {'name': 'read', 'detail': 'f'}), events)
         self.assertIn(('tool_finished', 'read'), events)
 
+    def test_each_completed_response_reports_its_own_usage_before_followup_work(self) -> None:
+        first = completed([call()])
+        first['response']['usage'] = {
+            'input_tokens': 1200,
+            'input_tokens_details': {'cached_tokens': 800, 'cache_write_tokens': 0},
+            'output_tokens': 100,
+            'output_tokens_details': {'reasoning_tokens': 40},
+            'total_tokens': 1300,
+        }
+        second = completed([message()])
+        second['response']['usage'] = {
+            'input_tokens': 1500,
+            'input_tokens_details': {'cached_tokens': 1000, 'cache_write_tokens': 0},
+            'output_tokens': 50,
+            'output_tokens_details': {'reasoning_tokens': 20},
+            'total_tokens': 1550,
+        }
+
+        events = self.run_stream([[first], [second]])
+
+        self.assertEqual([value for kind, value in events if kind == 'usage'], [
+            {'input_tokens': 1200, 'output_tokens': 100, 'total_tokens': 1300},
+            {'input_tokens': 1500, 'output_tokens': 50, 'total_tokens': 1550},
+        ])
+        kinds = [kind for kind, _ in events]
+        usage_indices = [index for index, kind in enumerate(kinds) if kind == 'usage']
+        self.assertLess(usage_indices[0], kinds.index('tool_started'))
+        self.assertLess(usage_indices[1], kinds.index('complete'))
+        self.assertEqual(len(self.executions), 1)
+        self.assertEqual(kinds[-1], 'complete')
+
+    def test_unsuccessful_or_inconsistent_responses_do_not_report_usage(self) -> None:
+        fixtures: list[list[WireEvent]] = [
+            [completed([message()], 'failed')],
+            [completed([message()], 'incomplete')],
+            [delta('Different preview'), completed([message()])],
+        ]
+        for fixture in fixtures:
+            with self.subTest(ending=fixture[-1]['type'], preview=len(fixture) > 1):
+                self.requests.clear()
+                ending = fixture[-1]
+                assert 'response' in ending
+                ending['response']['usage'] = {
+                    'input_tokens': 1200,
+                    'input_tokens_details': {'cached_tokens': 0, 'cache_write_tokens': 0},
+                    'output_tokens': 100,
+                    'output_tokens_details': {'reasoning_tokens': 40},
+                    'total_tokens': 1300,
+                }
+                events = self.run_stream([fixture])
+                self.assertNotIn('usage', [kind for kind, _ in events])
+                self.assertEqual(events[-1][0], 'error')
+
     def test_item_done_output_survives_empty_completion_and_replays_with_tool_result(self) -> None:
         outputs: list[OutputItem] = [reasoning(), call(arguments='{"path":"README.md"}')]
         events = self.run_stream([

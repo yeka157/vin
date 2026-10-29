@@ -296,6 +296,15 @@ def _request_response(
                     )
                 if len(text) > len(preview):
                     send("text", text[len(preview) :])
+                if response.usage:
+                    send(
+                        "usage",
+                        {
+                            "input_tokens": response.usage.input_tokens,
+                            "output_tokens": response.usage.output_tokens,
+                            "total_tokens": response.usage.total_tokens,
+                        },
+                    )
                 return response, bool(text.strip())
 
             elif event.type in ("response.failed", "response.incomplete", "error"):
