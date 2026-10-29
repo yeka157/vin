@@ -15,6 +15,6 @@ COMMANDS = {
 }
 
 
-def is_command(text):
+def is_command(text: str) -> bool:
     parts = text.split(maxsplit=1)
     return text in COMMANDS or bool(parts and parts[0] in ("/resume", "/rename"))

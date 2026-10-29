@@ -1,18 +1,15 @@
 import asyncio
 import vin.tui.app as vin
 from vin import main as entrypoint
-from vin.tui import bindings, layout, transcript as transcript_ui
-from contextlib import ExitStack, contextmanager, nullcontext, redirect_stdout
-from types import SimpleNamespace
+from vin.tui import transcript as transcript_ui
+from contextlib import nullcontext, redirect_stdout
 from threading import Event, get_ident
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import Mock, patch, AsyncMock, call
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import BufferControl, Layout, Window
-from prompt_toolkit.layout.mouse_handlers import MouseHandlers
-from prompt_toolkit.layout.screen import Screen, WritePosition
 from io import StringIO
 from rich.console import Console
 from prompt_toolkit.document import Document
@@ -24,11 +21,28 @@ from prompt_toolkit import PromptSession, Application
 from prompt_toolkit.key_binding import KeyPress
 from prompt_toolkit.buffer import Buffer
 
+from functools import partial
+from collections.abc import Callable, Coroutine, Sequence
+from typing import Literal, TypedDict, cast
+from rich.console import RenderableType
+from vin.types import Credentials, History, ModelMetadata, TranscriptEntry
+from vin.sessions.transcript import decode_transcript
+from vin.provider.events import ReplyEvents
+from prompt_toolkit.layout.controls import UIContent
+from session_typing_helpers import present, text_value, validated_transcript
+from tui_typing_helpers import key_event
+from tui_application_helpers import (
+    configure_test_session, console_factory, create_test_application,
+    fixture_credentials, loading_container, loading_control, mock_prompt, mock_run,
+    patch_tui, patch_ui_clock, session_bindings, transcript_entries,
+    fixture_registration, preserve_credentials, sign_out_registration,
+)
+
 
 REAL_SLEEP = asyncio.sleep
 
 
-def setUpModule():
+def setUpModule() -> None:
     # Receiver-loop tests may checkpoint conversations; never use user storage.
     temporary = TemporaryDirectory()
     unittest.addModuleCleanup(temporary.cleanup)
@@ -37,105 +51,19 @@ def setUpModule():
     unittest.addModuleCleanup(location.stop)
 
 
-@contextmanager
-def patch_tui(module, *, create=False, **replacements):
-    """Patch dependencies in the module that now owns their use."""
-    owners = {"PromptSession": layout, "Application": layout, "Console": transcript_ui}
-    with ExitStack() as stack:
-        for name, value in replacements.items():
-            stack.enter_context(patch.object(owners.get(name, module), name, value, create=create))
-        yield
 
 
-@contextmanager
-def patch_ui_clock(**options):
-    """Share the same test clock across state, layout, and keyboard handlers."""
-    clock = Mock(**options)
-    with ExitStack() as stack:
-        for module in (vin, layout, bindings):
-            stack.enter_context(patch.object(module, "monotonic", clock))
-        yield clock
-
-
-def configure_test_session(session, **options):
-    for name, value in options.items():
-        setattr(session, name, value)
-    return session
-
-
-def create_test_application(session, **options):
-    app = Application(**options)
-    native_run = app.run_async
-
-    async def feed_submissions():
-        run_future = app.future
-        owner = getattr(session.default_buffer.accept_handler, "__self__", None)
-
-        async def wait_for_setup():
-            while getattr(owner, "loading_model", False):
-                if run_future.done():
-                    return
-                if not isinstance(app.layout.current_control, BufferControl):
-                    app.key_processor.feed(KeyPress(Keys.ControlM))
-                    app.key_processor.process_keys()
-                await REAL_SLEEP(0)
-
-        await wait_for_setup()
-        if run_future.done():
-            return
-        while True:
-            text = await session.prompt_async("❯ ")
-            session.default_buffer.text = text
-            app.key_processor.feed(KeyPress(Keys.ControlM))
-            app.key_processor.process_keys()
-            if text in ("/exit", "/quit"):
-                await run_future
-                return
-            await REAL_SLEEP(0)
-            await wait_for_setup()
-            if run_future.done():
-                return
-            if not isinstance(app.layout.current_control, BufferControl):
-                app.key_processor.feed(KeyPress(Keys.ControlM))
-                app.key_processor.process_keys()
-                await REAL_SLEEP(0)
-
-    async def run_async(*, pre_run=None, **kwargs):
-        if app.run_async.await_count > 1:
-            raise AssertionError("Vin restarted the Application after it exited.")
-
-        def start():
-            if pre_run is not None:
-                pre_run()
-            app.create_background_task(feed_submissions())
-
-        loop = asyncio.get_running_loop()
-        previous_handler = loop.get_exception_handler()
-
-        def fail_on_background_error(loop, context):
-            if app.future is not None and not app.future.done():
-                app.exit(exception=context.get("exception") or RuntimeError(context["message"]))
-            else:
-                loop.default_exception_handler(context)
-
-        loop.set_exception_handler(fail_on_background_error)
-        try:
-            kwargs["set_exception_handler"] = False
-            return await asyncio.wait_for(native_run(pre_run=start, **kwargs), timeout=5)
-        except TimeoutError as error:
-            raise AssertionError("The UI did not finish within 5 seconds.") from error
-        finally:
-            loop.set_exception_handler(previous_handler)
-
-    app.run_async = AsyncMock(wraps=run_async)
-    return app
+class SignInContext(TypedDict, total=False):
+    loop: asyncio.AbstractEventLoop
+    cancel_event: Event
+    notify: Callable[[str], None]
 
 
 class RenderingTests(unittest.TestCase):
 
 
-    def test_intermediate_update_and_final_answer_keep_readable_markdown(self):
-        entries = [
+    def test_intermediate_update_and_final_answer_keep_readable_markdown(self) -> None:
+        entries: list[TranscriptEntry] = [
             {"role": "assistant", "content": "**Checking** the file.", "intermediate": True, "streaming": False},
             {"role": "assistant", "content": "**Finished** the change.", "streaming": False},
         ]
@@ -154,12 +82,12 @@ class RenderingTests(unittest.TestCase):
 
 class TranscriptControlTests(unittest.TestCase):
 
-    def test_viewport_holds_earlier_output_during_streaming_and_can_follow_latest(self):
-        entries = [{"role": "notice", "content": f"message {i:02}"} for i in range(20)]
+    def test_viewport_holds_earlier_output_during_streaming_and_can_follow_latest(self) -> None:
+        entries: list[TranscriptEntry] = [{"role": "notice", "content": f"message {i:02}"} for i in range(20)]
         entries.append({"role": "assistant", "content": "stream partial", "streaming": True})
         control = transcript_ui.TranscriptControl(lambda: entries)
 
-        def visible(content):
+        def visible(content: UIContent) -> str:
             return "\n".join(
                 "".join(part[1] for part in content.get_line(index))
                 for index in range(content.line_count)
@@ -176,6 +104,7 @@ class TranscriptControlTests(unittest.TestCase):
         self.assertIn("message 00", before)
         self.assertNotIn("stream partial", before)
 
+        assert entries[-1]["role"] == "assistant"
         entries[-1]["content"] += "\n" + "new streamed line\n" * 12 + "stream latest"
         growing = control.create_content(40, 5)
         self.assertEqual(visible(growing), before)
@@ -202,7 +131,7 @@ class TranscriptControlTests(unittest.TestCase):
 
 
 class TranscriptLayoutTests(unittest.IsolatedAsyncioTestCase):
-    async def test_long_transcript_keeps_latest_message_and_draft_visible(self):
+    async def test_long_transcript_keeps_latest_message_and_draft_visible(self) -> None:
         from prompt_toolkit import Application
         from prompt_toolkit.application.current import create_app_session, set_app
         from prompt_toolkit.buffer import Buffer
@@ -214,7 +143,7 @@ class TranscriptLayoutTests(unittest.IsolatedAsyncioTestCase):
         from prompt_toolkit.layout.mouse_handlers import MouseHandlers
         from prompt_toolkit.layout.screen import Screen, WritePosition
 
-        entries = [
+        entries: list[TranscriptEntry] = [
             {"role": "notice", "content": f"message {i}"} for i in range(50)
         ]
         transcript = Window(
@@ -227,7 +156,7 @@ class TranscriptLayoutTests(unittest.IsolatedAsyncioTestCase):
         root = HSplit([transcript, Window(height=1, char="─"), input_window])
 
         with create_app_session(input=DummyInput(), output=DummyOutput()):
-            app = Application(layout=Layout(root, focused_element=input_window))
+            app = Application[str](layout=Layout(root, focused_element=input_window))
             try:
                 with set_app(app):
                     screen = Screen()
@@ -254,10 +183,10 @@ class TranscriptLayoutTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.enterContext(patch.object(vin, "refresh_credentials", side_effect=lambda saved: saved))
+    def setUp(self) -> None:
+        self.enterContext(patch.object(vin, "refresh_credentials", side_effect=preserve_credentials))
         self.owner = vin.VinApp()
-        self.owner.credentials = {"access_token": "fake-access-token"}
+        self.owner.credentials = fixture_credentials("fake-access-token")
         self.owner.selected_model = "selected-model"
         self.owner.messages = [
             {"role": "user", "content": "Earlier question"},
@@ -265,39 +194,39 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.previous = [message.copy() for message in self.owner.messages]
         self.draft = Document("next draft\nkeep typing", cursor_position=4)
-        self.owner.session = SimpleNamespace(
-            app=Mock(), default_buffer=Buffer(document=self.draft)
-        )
+        self.owner.session = PromptSession[str](input=DummyInput(), output=DummyOutput())
+        self.owner.session.default_buffer = Buffer(document=self.draft)
+        self.owner.session.app = cast(Application[str], Mock(spec=Application))
 
-    async def wait_until(self, predicate):
+    async def wait_until(self, predicate: Callable[[], bool]) -> None:
         async with asyncio.timeout(2):
             while not predicate():
                 await REAL_SLEEP(0.001)
 
-    def start_reply(self, text):
+    def start_reply(self, text: str) -> asyncio.Task[Literal["error", "rate_limit"] | None]:
         self.assertTrue(
-            callable(getattr(self.owner, "stream_reply", None)),
+            callable(self.owner.stream_reply),
             "VinApp needs the async stream_reply method before connecting requests.",
         )
         task = asyncio.create_task(self.owner.stream_reply(text))
         self.owner.pending_reply = task
         return task
 
-    def assert_completion_footer(self, entry):
+    def assert_completion_footer(self, entry: TranscriptEntry) -> None:
         self.assertEqual(entry["role"], "notice")
         self.assertIsInstance(entry["content"], vin.Text)
-        self.assertEqual(entry["content"].style, "dim")
+        self.assertEqual(text_value(entry["content"]).style, "dim")
         self.assertRegex(
-            entry["content"].plain,
+            text_value(entry["content"]).plain,
             r"^[*✻] Worked for (?:\d+h )?(?:\d+m )?\d+s · done \d{1,2}:\d{2} [AP]M$",
         )
 
-    async def test_worker_streams_one_entry_and_commits_context_only_after_completion(self):
+    async def test_worker_streams_one_entry_and_commits_context_only_after_completion(self) -> None:
         release = Event()
-        seen = []
+        seen: list[tuple[int, Credentials | None, str | None, History, Event]] = []
         ui_thread = get_ident()
 
-        def worker(credentials, model, messages, events, cancel_event):
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
             seen.append((get_ident(), credentials, model, messages, cancel_event))
             events.put(("text", "**Hel"))
             release.wait(2)
@@ -316,7 +245,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.owner.messages, self.previous)
                 self.assertEqual(self.owner.session.default_buffer.document, self.draft)
                 self.assertNotEqual(seen[0][0], ui_thread)
-                self.assertEqual(seen[0][1], {"access_token": "fake-access-token"})
+                self.assertEqual(seen[0][1], fixture_credentials("fake-access-token"))
                 self.assertEqual(seen[0][2], "selected-model")
                 self.assertEqual(seen[0][3], self.previous + [
                     {"role": "user", "content": "Next question"}
@@ -348,21 +277,23 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.owner.session.default_buffer.document, self.draft)
 
 
-    async def test_worker_error_keeps_partial_and_draft_without_committing_context(self):
-        for partial, kind, message in (
+    async def test_worker_error_keeps_partial_and_draft_without_committing_context(self) -> None:
+        cases: list[tuple[str | None, Literal["error", "rate_limit"], str]] = [
             (None, "error", "ChatGPT stream ended before completion."),
             ("**partial", "error", "ChatGPT stream ended before completion."),
             ("**partial", "rate_limit", "ChatGPT request failed (HTTP 429)."),
-        ):
+        ]
+        for partial, kind, message in cases:
             with self.subTest(partial=partial, kind=kind):
                 self.owner.transcript.clear()
-                cancel_events = []
+                cancel_events: list[Event] = []
+                assert kind == "error" or kind == "rate_limit"
 
-                def worker(credentials, model, messages, events, cancel_event):
+                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, event_kind: Literal["error", "rate_limit"] = kind) -> None:
                     cancel_events.append(cancel_event)
                     if partial:
                         events.put(("text", partial))
-                    events.put((kind, message))
+                    events.put((event_kind, message))
 
                 with (
                     patch.object(vin, "stream_chatgpt_response", side_effect=worker, create=True),
@@ -379,12 +310,12 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(self.owner.transcript), 3 if partial else 2)
                 notice = self.owner.transcript[-2]
                 self.assertEqual(notice["role"], "notice")
-                self.assertEqual(notice["content"].plain, message)
-                self.assertEqual(notice["content"].style, "red")
+                self.assertEqual(text_value(notice["content"]).plain, message)
+                self.assertEqual(text_value(notice["content"]).style, "red")
                 footer = self.owner.transcript[-1]
                 self.assertEqual(footer["role"], "notice")
-                self.assertEqual(footer["content"].plain, "Failed after 3s")
-                self.assertEqual(footer["content"].style, "red")
+                self.assertEqual(text_value(footer["content"]).plain, "Failed after 3s")
+                self.assertEqual(text_value(footer["content"]).style, "red")
                 self.assertIsNone(self.owner.pending_reply)
                 self.assertIsNone(self.owner.reply_entry)
                 self.assertIsNone(self.owner.request_started_at)
@@ -392,11 +323,11 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(cancel_events[0].is_set())
                 self.assertEqual(self.owner.session.default_buffer.document, self.draft)
 
-    async def test_cancelled_worker_cannot_change_later_reply_or_its_context(self):
+    async def test_cancelled_worker_cannot_change_later_reply_or_its_context(self) -> None:
         old_release, new_release, old_finished = Event(), Event(), Event()
-        seen = []
+        seen: list[tuple[ReplyEvents, Event]] = []
 
-        def worker(credentials, model, messages, events, cancel_event):
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
             seen.append((events, cancel_event))
             if len(seen) == 1:
                 try:
@@ -412,7 +343,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
                 new_release.wait(2)
                 events.put(("complete", None))
 
-        tasks = []
+        tasks: list[asyncio.Task[Literal["error", "rate_limit"] | None]] = []
         with patch.object(vin, "stream_chatgpt_response", side_effect=worker, create=True):
             old = self.start_reply("Cancelled question")
             tasks.append(old)
@@ -457,28 +388,25 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ChatFlowTests(unittest.TestCase):
-    def test_user_command_before_and_after_logout(self):
+    def test_user_command_before_and_after_logout(self) -> None:
         output = StringIO()
-        panels = []
-        exchange = [
+        panels: list[RenderableType] = []
+        exchange: History = [
             {"role": "user", "content": "earlier question"},
             {"role": "assistant", "content": "earlier answer"},
         ]
         show_panel = vin.VinApp.show_panel
-        credentials = {
-            "access_token": "fake",
-            "email": "learner@example.test",
-            "subject": "test-account",
-        }
+        credentials = fixture_credentials("fake", "test-account")
+        credentials["email"] = "learner@example.test"
 
-        session = PromptSession(input=DummyInput(), output=DummyOutput())
+        session = PromptSession[str](input=DummyInput(), output=DummyOutput())
         session.prompt_async = AsyncMock(
             side_effect=["/user", "/logout", "/user", "/help", "/quit"]
         )
 
-        async def observe_panel(instance, content):
+        async def observe_panel(instance: vin.VinApp, content: RenderableType) -> None:
             if not panels:
-                instance.transcript.extend(exchange)
+                instance.transcript.extend(validated_transcript(decode_transcript(exchange)))
                 instance.messages.extend(exchange)
             previous_transcript = list(instance.transcript)
             previous_messages = list(instance.messages)
@@ -500,22 +428,16 @@ class ChatFlowTests(unittest.TestCase):
             vin,
             create=True,
             PromptSession=Mock(
-                side_effect=lambda **options: configure_test_session(session, **options)
+                side_effect=partial(configure_test_session, session)
             ),
-            Application=lambda **options: create_test_application(session, **options),
-            Console=lambda **options: (
-                Console(**options)
-                if options
-                else Console(file=output, width=80, color_system=None)
-            ),
+            Application=partial(create_test_application, session),
+            Console=partial(console_factory, Console(file=output, width=80, color_system=None)),
             load_active_session=lambda: credentials,
-            refresh_credentials=lambda saved: saved,
-            logout_chatgpt=lambda saved, **kwargs: {"subject": saved["subject"]},
-            patch_stdout=lambda **kwargs: nullcontext(),
-            list_chatgpt_models=lambda credentials: [
-                {"slug": "test-model", "display_name": "Test Model"}
-            ],
-            choose_chatgpt_model=lambda models: "test-model",
+            refresh_credentials=preserve_credentials,
+            logout_chatgpt=sign_out_registration,
+            patch_stdout=Mock(return_value=nullcontext()),
+            list_chatgpt_models=Mock(return_value=[{"slug": "test-model", "display_name": "Test Model"}]),
+            choose_chatgpt_model=Mock(return_value="test-model"),
             load_model_preference=lambda: None,
             save_model_preference=Mock(),
             save_cached_chatgpt_models=Mock(),
@@ -528,12 +450,12 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertEqual(len(panels), 3)
         self.assertIsInstance(panels[0], vin.Text)
-        self.assertEqual(panels[0].plain, "ChatGPT: learner@example.test")
+        self.assertEqual(text_value(panels[0]).plain, "ChatGPT: learner@example.test")
         self.assertIsInstance(panels[1], vin.Text)
-        self.assertEqual(panels[1].plain, "Signed out. Use /login to sign in")
+        self.assertEqual(text_value(panels[1]).plain, "Signed out. Use /login to sign in")
         self.assertIsInstance(panels[2], vin.Markdown)
-        self.assertEqual(session.prompt_async.await_count, 5)
-        entries = session.layout.container.children[0].content.get_entries()
+        self.assertEqual(mock_prompt(session).await_count, 5)
+        entries = transcript_entries(session)
         rendered = "".join(
             fragment[1]
             for fragment in to_formatted_text(transcript_ui.render_transcript(entries, 80, 20))
@@ -551,10 +473,10 @@ class ChatFlowTests(unittest.TestCase):
 
 
 class InitialModelTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.app = vin.VinApp()
-        self.credentials = {"access_token": "fake-token"}
-        self.models = [
+        self.credentials: Credentials | None = fixture_credentials()
+        self.models: list[ModelMetadata] = [
             {"slug": "old-model", "display_name": "Old Model"},
             {"slug": "new-model", "display_name": "New Model"},
         ]
@@ -584,7 +506,7 @@ class InitialModelTests(unittest.TestCase):
         self.addCleanup(picker.stop)
 
 
-    def test_first_selection_uses_inline_picker_and_saves_default(self):
+    def test_first_selection_uses_inline_picker_and_saves_default(self) -> None:
         self.load.return_value = None
 
         asyncio.run(self.app.load_initial_model())
@@ -600,7 +522,7 @@ class InitialModelTests(unittest.TestCase):
         self.assertEqual(self.app.transcript, [])
 
 
-    def test_cancelled_selection_does_not_save_or_replace_active_model(self):
+    def test_cancelled_selection_does_not_save_or_replace_active_model(self) -> None:
         self.load.return_value = None
         self.inline.side_effect = asyncio.CancelledError
 
@@ -614,28 +536,26 @@ class InitialModelTests(unittest.TestCase):
 
 
 class ModelCommandTests(unittest.TestCase):
-    def setUp(self):
-        self.console = Mock()
-        self.credentials = {
-            "access_token": "fake-token",
-            "subject": "fake-account",
-        }
-        self.signed_in = {
-            "access_token": "fake-new-token",
-            "subject": "new-fake-account",
-        }
-        self.models = [
+    def setUp(self) -> None:
+        self.console = Mock(spec=Console)
+        self.console_print = Mock()
+        self.console_clear = Mock()
+        self.console.print = self.console_print
+        self.console.clear = self.console_clear
+        self.credentials: Credentials | None = fixture_credentials()
+        self.signed_in = fixture_credentials("fake-new-token", "new-fake-account")
+        self.models: list[ModelMetadata] = [
             {"slug": "old-model", "display_name": "Old Model"},
             {"slug": "new-model", "display_name": "New Model"},
         ]
-        self.session = PromptSession(input=DummyInput(), output=DummyOutput())
+        self.session = PromptSession[str](input=DummyInput(), output=DummyOutput())
         self.factory = Mock(
-            side_effect=lambda **options: configure_test_session(self.session, **options)
+            side_effect=partial(configure_test_session, self.session)
         )
-        self.refresh = Mock(side_effect=lambda saved: saved)
+        self.refresh = Mock(side_effect=preserve_credentials)
         self.load_session = Mock(side_effect=lambda: self.credentials)
         self.login = Mock(return_value=self.signed_in)
-        self.logout = Mock(return_value={"subject": "fake-account"})
+        self.logout = Mock(return_value=fixture_registration())
         self.login_picker = Mock(return_value="chatgpt")
         self.catalog = Mock(return_value=self.models)
         self.load = Mock(return_value={"provider": "chatgpt", "model": "old-model"})
@@ -645,7 +565,7 @@ class ModelCommandTests(unittest.TestCase):
         self.cached = Mock(return_value=self.models)
         self.cache_save = Mock()
 
-    def run_chat(self, commands):
+    def run_chat(self, commands: Sequence[str] | Callable[[str], Coroutine[object, object, str]]) -> None:
         self.vin_app = vin.VinApp()
         self.session.prompt_async = AsyncMock(side_effect=commands)
 
@@ -653,8 +573,8 @@ class ModelCommandTests(unittest.TestCase):
             vin,
             create=True,
             PromptSession=self.factory,
-            Application=lambda **options: create_test_application(self.session, **options),
-            Console=lambda **options: Console(**options) if options else self.console,
+            Application=partial(create_test_application, self.session),
+            Console=partial(console_factory, self.console),
             load_active_session=self.load_session,
             refresh_credentials=self.refresh,
             logout_chatgpt=self.logout,
@@ -666,14 +586,14 @@ class ModelCommandTests(unittest.TestCase):
             save_model_preference=self.save,
             load_cached_chatgpt_models=self.cached,
             save_cached_chatgpt_models=self.cache_save,
-            patch_stdout=lambda **kwargs: nullcontext(),
+            patch_stdout=Mock(return_value=nullcontext()),
         ):
             with create_pipe_input() as pipe:
                 with create_app_session(input=pipe, output=DummyOutput()):
                     self.vin_app.run()
 
-    def assert_model_indicator(self, expected):
-        visible_text = []
+    def assert_model_indicator(self, expected: str) -> None:
+        visible_text: list[str] = []
         for window in self.session.layout.find_all_windows():
             if isinstance(window.content, vin.FormattedTextControl):
                 rendered = window.content.create_content(80, 1)
@@ -682,7 +602,7 @@ class ModelCommandTests(unittest.TestCase):
                 )
         self.assertIn(expected, visible_text)
 
-    def assert_transcript_live_indicator(self, elapsed=None):
+    def assert_transcript_live_indicator(self, elapsed: str | None = None) -> None:
         fragments = to_formatted_text(
             transcript_ui.render_transcript(self.vin_app.get_transcript_entries(), 80, 20)
         )
@@ -692,8 +612,8 @@ class ModelCommandTests(unittest.TestCase):
         if elapsed is not None:
             self.assertIn(f"Thinking… ({elapsed})", text)
 
-    def assert_error_notice(self, expected, *, command=None):
-        entries = self.session.layout.container.children[0].content.get_entries()
+    def assert_error_notice(self, expected: str, *, command: str | None = None) -> None:
+        entries = transcript_entries(self.session)
         self.assertEqual(len(entries), 2 if command is None else 3)
         if command is not None:
             self.assertEqual(entries[1], {"role": "user", "content": command})
@@ -707,25 +627,25 @@ class ModelCommandTests(unittest.TestCase):
         )
         self.assertEqual(text, expected + "\n\n")
         self.assertEqual(red_text, expected)
-        self.console.print.assert_not_called()
+        self.console_print.assert_not_called()
 
 
-    def test_receiver_serializes_submissions_and_survives_response_cancellation(self):
+    def test_receiver_serializes_submissions_and_survives_response_cancellation(self) -> None:
         for outcome in ("complete", "error", "cancel", "exit", "rate_limit_empty", "rate_limit_draft"):
             with self.subTest(outcome=outcome):
                 release = Event()
                 text_ready = Event()
                 finished = Event()
-                requests = []
+                requests: list[tuple[History, Event]] = []
                 step = 0
                 draft = Document("newer unsent\ndraft", cursor_position=5)
 
-                async def wait_until(predicate):
+                async def wait_until(predicate: Callable[[], bool]) -> None:
                     async with asyncio.timeout(2):
                         while not predicate():
                             await REAL_SLEEP(0.001)
 
-                def worker(credentials, model, messages, events, cancel_event):
+                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
                     requests.append((messages, cancel_event))
                     question = messages[-1]["content"]
                     if question == "first":
@@ -746,7 +666,7 @@ class ModelCommandTests(unittest.TestCase):
                         events.put(("text", f"answer: {question}"))
                         events.put(("complete", None))
 
-                async def read(_):
+                async def read(_: str) -> str:
                     nonlocal step
                     step += 1
                     if step == 1:
@@ -754,7 +674,7 @@ class ModelCommandTests(unittest.TestCase):
 
                     owner = self.vin_app
 
-                    def accept(text):
+                    def accept(text: str) -> None:
                         buffer = self.session.default_buffer
                         buffer.document = Document(text)
                         owner.app.key_processor.feed(KeyPress(Keys.ControlM))
@@ -763,19 +683,19 @@ class ModelCommandTests(unittest.TestCase):
                         buffer.document = draft
 
                     await wait_until(lambda: len(requests) == 1)
-                    self.assertFalse(self.session.layout.container.children[1].filter())
+                    self.assertFalse(loading_container(self.session).filter())
                     self.assert_transcript_live_indicator()
                     accept("second")
                     text_ready.set()
                     await wait_until(lambda: owner.reply_entry is not None and
                                      owner.reply_entry["content"] == "first partial")
-                    self.assertFalse(self.session.layout.container.children[1].filter())
+                    self.assertFalse(loading_container(self.session).filter())
                     self.assert_transcript_live_indicator()
                     accept("third")
-                    for _ in range(4):
+                    for _tick in range(4):
                         await REAL_SLEEP(0)
 
-                    self.assertEqual(list(getattr(owner, "queued_prompts", [])), ["second", "third"])
+                    self.assertEqual(list(owner.queued_prompts), ["second", "third"])
                     self.assertEqual(len(requests), 1)
                     self.assertEqual(owner.messages, [])
                     self.assertEqual(
@@ -793,7 +713,7 @@ class ModelCommandTests(unittest.TestCase):
                     release.set()
                     questions = ["first", "second", "third"]
                     if outcome.startswith("rate_limit"):
-                        await wait_until(lambda: getattr(owner, "queue_paused", False))
+                        await wait_until(lambda: owner.queue_paused)
                         self.assertIsNone(owner.pending_reply)
                         self.assertEqual(len(requests), 1)
                         self.assertEqual(list(owner.queued_prompts), ["second", "third"])
@@ -821,7 +741,7 @@ class ModelCommandTests(unittest.TestCase):
                         [request[-1]["content"] for request, _ in requests],
                         questions,
                     )
-                    first_pair = [
+                    first_pair: History = [
                         {"role": "user", "content": "first"},
                         {"role": "assistant", "content": "first partial done"},
                     ] if outcome == "complete" else []
@@ -852,7 +772,7 @@ class ModelCommandTests(unittest.TestCase):
                     self.assertEqual(self.vin_app.messages, [])
 
 
-    def test_returning_startup_restores_cached_model_without_network_requests(self):
+    def test_returning_startup_restores_cached_model_without_network_requests(self) -> None:
         self.refresh.side_effect = RuntimeError("Startup must not wait for token refresh.")
         self.catalog.side_effect = RuntimeError("Startup must not wait for discovery.")
         self.run_chat(["/quit"])
@@ -863,12 +783,12 @@ class ModelCommandTests(unittest.TestCase):
         self.inline.assert_not_awaited()
         self.save.assert_not_called()
         self.assertFalse(self.vin_app.loading_model)
-        self.assertEqual(self.session.prompt_async.await_count, 1)
+        self.assertEqual(mock_prompt(self.session).await_count, 1)
         self.assertEqual(self.vin_app.messages, [])
         self.cache_save.assert_not_called()
 
 
-    def test_model_command_discovers_and_caches_choices_only_when_cache_is_missing(self):
+    def test_model_command_discovers_and_caches_choices_only_when_cache_is_missing(self) -> None:
         self.cached.return_value = []
         self.run_chat(["/model", "/quit"])
 
@@ -882,24 +802,24 @@ class ModelCommandTests(unittest.TestCase):
         )
         self.save.assert_called_once_with("chatgpt", "new-model")
         self.assert_model_indicator(" ChatGPT · New Model")
-        self.assertEqual(self.vin_app.app.run_async.await_count, 1)
+        self.assertEqual(mock_run(self.vin_app.app).await_count, 1)
         self.assertFalse(self.vin_app.loading_model)
 
 
-    def test_ctrl_c_cancels_on_demand_discovery_and_discards_late_models(self):
+    def test_ctrl_c_cancels_on_demand_discovery_and_discards_late_models(self) -> None:
         self.cached.return_value = []
         release_worker = Event()
         worker_finished = Event()
-        context = {}
+        context: dict[str, asyncio.AbstractEventLoop] = {}
         step = 0
 
-        def cancel_from_ui():
+        def cancel_from_ui() -> None:
             buffer = self.session.default_buffer
             buffer.document = Document("keep this draft", cursor_position=4)
             self.vin_app.app.key_processor.feed(KeyPress(Keys.ControlC))
             self.vin_app.app.key_processor.process_keys()
 
-        def discover(credentials):
+        def discover(credentials: Credentials) -> list[ModelMetadata]:
             self.assertIn("loop", context, "Discovery must not run at launch.")
             context["loop"].call_soon_threadsafe(cancel_from_ui)
             if not release_worker.wait(2):
@@ -907,7 +827,7 @@ class ModelCommandTests(unittest.TestCase):
             worker_finished.set()
             return self.models
 
-        async def read(_):
+        async def read(_: str) -> str:
             nonlocal step
             step += 1
             if step == 1:
@@ -928,7 +848,7 @@ class ModelCommandTests(unittest.TestCase):
 
         self.assertTrue(worker_finished.is_set())
         self.assertEqual(step, 2)
-        self.assertEqual(self.vin_app.app.run_async.await_count, 1)
+        self.assertEqual(mock_run(self.vin_app.app).await_count, 1)
         self.assertEqual(self.vin_app.models, [])
         self.assertEqual(self.vin_app.selected_model, "old-model")
         self.assertEqual(
@@ -943,13 +863,16 @@ class ModelCommandTests(unittest.TestCase):
         self.cache_save.assert_not_called()
 
 
-    def test_rapid_enter_queues_each_prompt_and_preserves_the_latest_unsent_draft(self):
+    def test_rapid_enter_queues_each_prompt_and_preserves_the_latest_unsent_draft(self) -> None:
         self.run_chat(["/quit"])
-        bindings = self.factory.call_args.kwargs["key_bindings"]
+        bindings = session_bindings(self.session)
         submit = bindings.get_bindings_for_keys((Keys.ControlM,))[-1].handler
         accept = Mock(wraps=self.session.default_buffer.accept_handler)
         buffer = Buffer(document=Document("first\nline"), accept_handler=accept)
-        event = SimpleNamespace(app=Mock(), current_buffer=buffer)
+        event_app = Application[str](layout=Layout(Window(BufferControl(buffer))), input=DummyInput(), output=DummyOutput())
+        exit_mock = Mock()
+        event_app.exit = exit_mock
+        event = key_event(event_app, Keys.ControlM)
 
         submit(event)
         self.assertEqual(buffer.text, "")
@@ -961,22 +884,22 @@ class ModelCommandTests(unittest.TestCase):
         self.assertEqual(list(self.vin_app.queued_prompts), ["first\nline", "next draft\nline"])
         self.assertEqual(buffer.document, Document("latest unsent draft", cursor_position=5))
         self.assertEqual(accept.call_count, 2)
-        event.app.exit.assert_not_called()
+        exit_mock.assert_not_called()
 
 
-    def test_model_loading_keeps_draft_editable_and_blocks_submission_until_ready(self):
+    def test_model_loading_keeps_draft_editable_and_blocks_submission_until_ready(self) -> None:
         self.run_chat(["/quit"])
         self.assertFalse(self.vin_app.loading_model)
         buffer = self.session.default_buffer
-        loading = self.session.layout.container.children[1]
+        loading = loading_container(self.session)
         transcript = list(self.vin_app.transcript)
 
-        async def exercise_loading():
+        async def exercise_loading() -> None:
             buffer.document = Document("next draft\nline", cursor_position=5)
             self.vin_app.loading_model = True
             try:
                 self.assertTrue(loading.filter())
-                rendered = loading.content.children[0].content.create_content(80, 1)
+                rendered = loading_control(self.session).create_content(80, 1)
                 text = "".join(fragment[1] for fragment in rendered.get_line(0))
                 self.assertIn("Loading models…", text)
 
@@ -1008,25 +931,27 @@ class ModelCommandTests(unittest.TestCase):
             asyncio.run(exercise_loading())
 
 
-    def test_information_panel_preserves_draft_history_and_shutdown_cancellation(self):
+    def test_information_panel_preserves_draft_history_and_shutdown_cancellation(self) -> None:
         for key in (
             Keys.ControlM, Keys.ControlC, Keys.ControlD, Keys.Escape, "task cancellation"
         ):
             with self.subTest(key=key):
                 self.run_chat(["/quit"])
-                previous_exchange = [
+                previous_exchange: History = [
                     {"role": "user", "content": "earlier message"},
                     {"role": "assistant", "content": "earlier answer"},
                 ]
-                self.vin_app.transcript.extend(previous_exchange)
+                self.vin_app.transcript.extend(validated_transcript(decode_transcript(previous_exchange)))
                 self.vin_app.messages.extend(previous_exchange)
                 previous_transcript = list(self.vin_app.transcript)
                 previous_messages = list(self.vin_app.messages)
-                bindings = self.factory.call_args.kwargs["key_bindings"]
+                bindings = session_bindings(self.session)
                 buffer = self.session.default_buffer
-                app = Mock()
+                event_app = Application[str](layout=Layout(Window(BufferControl(buffer))), input=DummyInput(), output=DummyOutput())
+                exit_mock = Mock()
+                event_app.exit = exit_mock
 
-                async def exercise_panel():
+                async def exercise_panel() -> None:
                     buffer.document = Document("next draft\nline", cursor_position=5)
                     task = asyncio.create_task(
                         self.vin_app.show_panel(
@@ -1049,7 +974,9 @@ class ModelCommandTests(unittest.TestCase):
                             self.vin_app.input_window,
                             list(self.session.layout.find_all_windows()),
                         )
-                        rendered = self.vin_app.choice_menu.content.create_content(80, 20)
+                        panel = self.vin_app.choice_menu
+                        assert isinstance(panel, Window)
+                        rendered = panel.content.create_content(80, 20)
                         text = "\n".join(
                             "".join(fragment[1] for fragment in rendered.get_line(index))
                             for index in range(rendered.line_count)
@@ -1063,6 +990,7 @@ class ModelCommandTests(unittest.TestCase):
                             with self.assertRaises(asyncio.CancelledError):
                                 await asyncio.wait_for(task, timeout=1)
                         else:
+                            assert isinstance(key, Keys)
                             binding = bindings.get_bindings_for_keys((key,))[-1]
                             self.assertTrue(binding.filter())
                             if key == Keys.Escape:
@@ -1071,11 +999,11 @@ class ModelCommandTests(unittest.TestCase):
                                 self.vin_app.app.key_processor.process_keys()
                             else:
                                 binding.handler(
-                                    SimpleNamespace(app=app, current_buffer=buffer)
+                                    key_event(event_app, key)
                                 )
                             self.assertIsNone(await asyncio.wait_for(task, timeout=1))
 
-                        app.exit.assert_not_called()
+                        exit_mock.assert_not_called()
                         self.assertIs(
                             self.session.layout.current_window,
                             self.vin_app.input_window,
@@ -1100,11 +1028,11 @@ class ModelCommandTests(unittest.TestCase):
                     asyncio.run(exercise_panel())
 
 
-    def test_escape_enter_still_inserts_newline_when_no_panel_is_open(self):
+    def test_escape_enter_still_inserts_newline_when_no_panel_is_open(self) -> None:
         self.run_chat(["/quit"])
         buffer = self.session.default_buffer
 
-        async def exercise_newline():
+        async def exercise_newline() -> None:
             try:
                 buffer.document = Document("draft", cursor_position=5)
                 self.vin_app.app.key_processor.feed(KeyPress(Keys.Escape))
@@ -1122,15 +1050,15 @@ class ModelCommandTests(unittest.TestCase):
         with set_app(self.vin_app.app):
             asyncio.run(exercise_newline())
 
-    def test_first_run_uses_inline_sign_in_and_model_selection(self):
+    def test_first_run_uses_inline_sign_in_and_model_selection(self) -> None:
         self.credentials = None
         self.load.return_value = None
         self.inline.side_effect = ["chatgpt", "new-model"]
         self.run_chat(["/quit"])
 
         self.assertEqual(self.inline.await_args_list, [
-            unittest.mock.call("Sign in to Vin", [("chatgpt", "Sign in with ChatGPT")]),
-            unittest.mock.call(
+            call("Sign in to Vin", [("chatgpt", "Sign in with ChatGPT")]),
+            call(
                 "Choose a ChatGPT model",
                 [("old-model", "Old Model"), ("new-model", "New Model")],
             ),
@@ -1141,39 +1069,40 @@ class ModelCommandTests(unittest.TestCase):
         self.save.assert_called_once_with("chatgpt", "new-model")
         self.cache_save.assert_called_once_with(self.signed_in, self.models)
         self.assert_model_indicator(" ChatGPT · New Model")
-        self.assertEqual(self.vin_app.app.run_async.await_count, 1)
+        self.assertEqual(mock_run(self.vin_app.app).await_count, 1)
         self.assertEqual(self.vin_app.messages, [])
 
 
-    def test_ctrl_c_signals_browser_worker_and_discards_late_result(self):
+    def test_ctrl_c_signals_browser_worker_and_discards_late_result(self) -> None:
         self.credentials = None
         ui_thread = get_ident()
-        context = {}
+        context: SignInContext = {}
 
-        async def choose_sign_in(*args, **kwargs):
+        async def choose_sign_in(message: str, options: Sequence[tuple[str, str]], default: str | None = None) -> str:
             context["loop"] = asyncio.get_running_loop()
             return "chatgpt"
 
-        def cancel_from_ui():
+        def cancel_from_ui() -> None:
             buffer = self.session.default_buffer
             buffer.document = Document("keep this draft", cursor_position=4)
             self.vin_app.app.key_processor.feed(KeyPress(Keys.ControlC))
             self.vin_app.app.key_processor.process_keys()
 
-        def sign_in(registration, **options):
+        def sign_in(registration: Credentials | None, *, cancel_event: Event, notify: Callable[[str], None]) -> Credentials:
             self.assertNotEqual(get_ident(), ui_thread)
-            context.update(options)
-            context["loop"].call_soon_threadsafe(cancel_from_ui)
-            if not options["cancel_event"].wait(2):
+            context["cancel_event"] = cancel_event
+            context["notify"] = notify
+            present(context.get("loop")).call_soon_threadsafe(cancel_from_ui)
+            if not cancel_event.wait(2):
                 raise RuntimeError("The browser worker was not cancelled.")
-            options["notify"]("Late sign-in success")
+            notify("Late sign-in success")
             return self.signed_in
 
         self.inline.side_effect = choose_sign_in
         self.login.side_effect = sign_in
         self.run_chat(["/quit"])
 
-        self.assertTrue(context["cancel_event"].is_set())
+        self.assertTrue(present(context.get("cancel_event")).is_set())
         self.assertIsNone(self.vin_app.credentials)
         self.assertIsNone(self.vin_app.selected_model)
         self.assertEqual(self.vin_app.models, [])
@@ -1182,23 +1111,22 @@ class ModelCommandTests(unittest.TestCase):
         self.assertEqual((buffer.text, buffer.cursor_position), ("keep this draft", 4))
         self.assertEqual(len(self.vin_app.transcript), 1)
         self.assertEqual(self.vin_app.messages, [])
-        self.session.prompt_async.assert_not_awaited()
+        mock_prompt(self.session).assert_not_awaited()
         self.catalog.assert_not_called()
         self.save.assert_not_called()
 
-    def test_browser_sign_in_failure_returns_to_input_with_notice(self):
+    def test_browser_sign_in_failure_returns_to_input_with_notice(self) -> None:
         self.credentials = None
         self.inline.return_value = "chatgpt"
 
-        def failed_sign_in(registration, **options):
-            if "notify" in options:
-                options["notify"]("Could not open the sign-in browser")
+        def failed_sign_in(registration: Credentials | None, *, cancel_event: Event, notify: Callable[[str], None]) -> None:
+            notify("Could not open the sign-in browser")
             return None
 
         self.login.side_effect = failed_sign_in
         self.run_chat(["/quit"])
 
-        self.assertEqual(self.session.prompt_async.await_count, 1)
+        self.assertEqual(mock_prompt(self.session).await_count, 1)
         self.assertIn(
             "Could not open the sign-in browser",
             [str(entry["content"]) for entry in self.vin_app.transcript],
@@ -1208,15 +1136,15 @@ class ModelCommandTests(unittest.TestCase):
         self.assert_model_indicator(" Not signed in · /login")
         self.catalog.assert_not_called()
         self.save.assert_not_called()
-        self.console.print.assert_not_called()
+        self.console_print.assert_not_called()
 
 
-    def test_model_command_opens_picker_and_saves_selection(self):
-        async def pick(*args, **kwargs):
+    def test_model_command_opens_picker_and_saves_selection(self) -> None:
+        async def pick(message: str, options: Sequence[tuple[str, str]], default: str | None = None) -> str:
             self.assertEqual(len(self.vin_app.transcript), 1)
             return "new-model"
 
-        def save(*args):
+        def save(provider: str, model: str) -> None:
             self.assertEqual(len(self.vin_app.transcript), 1)
 
         self.inline.side_effect = pick
@@ -1232,7 +1160,7 @@ class ModelCommandTests(unittest.TestCase):
         self.save.assert_called_once_with("chatgpt", "new-model")
         self.catalog.assert_not_called()
         self.refresh.assert_not_called()
-        entries = self.session.layout.container.children[0].content.get_entries()
+        entries = transcript_entries(self.session)
         self.assertEqual(
             entries[1:],
             [
@@ -1241,26 +1169,26 @@ class ModelCommandTests(unittest.TestCase):
             ],
         )
         self.assertEqual(self.vin_app.messages, [])
-        self.console.print.assert_not_called()
+        self.console_print.assert_not_called()
         self.assert_model_indicator(" ChatGPT · New Model")
 
 
-    def test_cancelled_login_chooser_keeps_account_model_conversation_and_draft(self):
-        exchange = [
+    def test_cancelled_login_chooser_keeps_account_model_conversation_and_draft(self) -> None:
+        exchange: History = [
             {"role": "user", "content": "earlier question"},
             {"role": "assistant", "content": "earlier answer"},
         ]
         step = 0
 
-        async def choose_sign_in(*args, **kwargs):
+        async def choose_sign_in(message: str, options: Sequence[tuple[str, str]], default: str | None = None) -> str:
             self.session.default_buffer.document = Document("next draft", cursor_position=4)
             raise asyncio.CancelledError
 
-        async def read(_):
+        async def read(_: str) -> str:
             nonlocal step
             step += 1
             if step == 1:
-                self.vin_app.transcript.extend(exchange)
+                self.vin_app.transcript.extend(validated_transcript(decode_transcript(exchange)))
                 self.vin_app.messages.extend(exchange)
                 return "/login"
             buffer = self.session.default_buffer
@@ -1275,21 +1203,21 @@ class ModelCommandTests(unittest.TestCase):
 
         self.assertEqual(self.vin_app.messages, exchange)
         self.assertEqual(self.vin_app.transcript[1:], exchange)
-        self.assertEqual(self.vin_app.app.run_async.await_count, 1)
+        self.assertEqual(mock_run(self.vin_app.app).await_count, 1)
         self.logout.assert_not_called()
         self.login.assert_not_called()
         self.save.assert_not_called()
         self.assertFalse(self.vin_app.loading_model)
 
 
-    def test_logout_worker_keeps_input_editable_and_routes_warning_inside_workspace(self):
-        context = {}
+    def test_logout_worker_keeps_input_editable_and_routes_warning_inside_workspace(self) -> None:
+        context: dict[str, asyncio.AbstractEventLoop] = {}
         ui_thread = get_ident()
         probe_done = Event()
         warning = "[red]Remote revocation was not confirmed.[/red]"
-        registration = {"subject": "fake-account"}
+        registration = fixture_registration()
 
-        def probe_ui():
+        def probe_ui() -> None:
             try:
                 self.assertTrue(self.vin_app.app.is_running)
                 self.assertTrue(self.vin_app.loading_model)
@@ -1301,18 +1229,17 @@ class ModelCommandTests(unittest.TestCase):
                 self.vin_app.app.key_processor.process_keys()
                 self.assertEqual((buffer.text, buffer.cursor_position), ("nextx draft", 5))
                 self.assertTrue(self.vin_app.submitted.empty())
-                loading = self.session.layout.container.children[1]
                 text = "".join(
                     fragment[1]
-                    for fragment in to_formatted_text(loading.content.children[0].content.text)
+                    for fragment in to_formatted_text(loading_control(self.session).text)
                 )
                 self.assertIn("Signing out", text)
             finally:
                 probe_done.set()
 
-        def sign_out(saved, *, notify=print):
+        def sign_out(saved: Credentials, *, notify: Callable[[str], None] = print) -> Credentials:
             self.assertNotEqual(get_ident(), ui_thread)
-            saved.clear()
+            saved.pop("access_token", None)
             saved.update(registration)
             notify(warning)
             context["loop"].call_soon_threadsafe(probe_ui)
@@ -1322,7 +1249,7 @@ class ModelCommandTests(unittest.TestCase):
 
         step = 0
 
-        async def read(_):
+        async def read(_: str) -> str:
             nonlocal step
             step += 1
             if step == 1:
@@ -1339,7 +1266,7 @@ class ModelCommandTests(unittest.TestCase):
 
         self.assertTrue(probe_done.is_set())
         self.assertEqual(output.getvalue(), "")
-        self.assertEqual(self.vin_app.app.run_async.await_count, 1)
+        self.assertEqual(mock_run(self.vin_app.app).await_count, 1)
         self.assertEqual(self.vin_app.credentials, registration)
         self.assertEqual(self.vin_app.models, [])
         self.assertIsNone(self.vin_app.selected_model)
@@ -1351,43 +1278,43 @@ class ModelCommandTests(unittest.TestCase):
         self.assert_model_indicator(" Not signed in · /login")
 
 
-    def test_cancelled_logout_finishes_cleanup_before_accepting_another_command(self):
-        context = {}
+    def test_cancelled_logout_finishes_cleanup_before_accepting_another_command(self) -> None:
+        context: dict[str, asyncio.AbstractEventLoop] = {}
         ui_thread = get_ident()
         release_worker = Event()
         worker_finished = Event()
         step = 0
 
-        async def cancel_from_ui():
+        async def cancel_from_ui() -> None:
             buffer = self.session.default_buffer
             buffer.document = Document("keep this draft", cursor_position=4)
             self.vin_app.app.key_processor.feed(KeyPress(Keys.ControlC))
             self.vin_app.app.key_processor.process_keys()
             for _ in range(50):
-                if getattr(self.vin_app, "auth_status", None) == "Finishing sign-out…":
+                if self.vin_app.auth_status == "Finishing sign-out…":
                     break
                 await REAL_SLEEP(0)
             self.assertEqual(self.vin_app.auth_status, "Finishing sign-out…")
             self.assertTrue(self.vin_app.app.is_running)
             self.assertTrue(self.vin_app.loading_model)
-            self.assertEqual(self.vin_app.pending_auth.cancelling(), 1)
+            self.assertEqual(present(self.vin_app.pending_auth).cancelling(), 1)
             self.vin_app.app.key_processor.feed(KeyPress(Keys.ControlC))
             self.vin_app.app.key_processor.process_keys()
             release_worker.set()
 
-        def sign_out(saved, *, notify=print):
+        def sign_out(saved: Credentials, *, notify: Callable[[str], None] = print) -> Credentials:
             self.assertNotEqual(get_ident(), ui_thread)
             context["loop"].call_soon_threadsafe(
                 self.vin_app.app.create_background_task, cancel_from_ui()
             )
             if not release_worker.wait(2):
                 raise RuntimeError("Sign-out cleanup was abandoned.")
-            saved.clear()
-            saved.update({"subject": "fake-account"})
+            saved.pop("access_token", None)
+            saved.update(fixture_registration())
             worker_finished.set()
             return saved
 
-        async def read(_):
+        async def read(_: str) -> str:
             nonlocal step
             step += 1
             if step == 1:
@@ -1407,24 +1334,24 @@ class ModelCommandTests(unittest.TestCase):
             release_worker.set()
 
         self.assertEqual(step, 2)
-        self.assertEqual(self.vin_app.app.run_async.await_count, 1)
+        self.assertEqual(mock_run(self.vin_app.app).await_count, 1)
         self.assertEqual(self.vin_app.models, [])
         self.assertIsNone(self.vin_app.selected_model)
-        self.assertEqual(self.vin_app.credentials, {"subject": "fake-account"})
+        self.assertEqual(self.vin_app.credentials, fixture_registration())
         self.assertEqual(self.vin_app.messages, [])
 
 
-    def test_help_renders_only_in_panel_and_preserves_conversation(self):
-        snapshots = []
-        panels = []
+    def test_help_renders_only_in_panel_and_preserves_conversation(self) -> None:
+        snapshots: list[list[TranscriptEntry]] = []
+        panels: list[RenderableType] = []
         commands = iter(["/help", "/quit"])
-        exchange = [
+        exchange: History = [
             {"role": "user", "content": "earlier question"},
             {"role": "assistant", "content": "earlier answer"},
         ]
         show_panel = vin.VinApp.show_panel
 
-        async def observe_panel(instance, content):
+        async def observe_panel(instance: vin.VinApp, content: RenderableType) -> None:
             panels.append(content)
             buffer = self.session.default_buffer
             buffer.document = Document("next draft\nline", cursor_position=5)
@@ -1436,11 +1363,11 @@ class ModelCommandTests(unittest.TestCase):
             self.assertIsNone(instance.choice_menu)
             self.assertIsNone(instance.choice_future)
 
-        async def read(_):
+        async def read(_: str) -> str:
             if not snapshots:
-                self.vin_app.transcript.extend(exchange)
+                self.vin_app.transcript.extend(validated_transcript(decode_transcript(exchange)))
                 self.vin_app.messages.extend(exchange)
-            entries = self.session.layout.container.children[0].content.get_entries()
+            entries = transcript_entries(self.session)
             snapshots.append(list(entries))
             return next(commands)
 
@@ -1463,16 +1390,16 @@ class ModelCommandTests(unittest.TestCase):
         self.assertEqual(snapshots[0], snapshots[1])
         self.assertEqual(self.vin_app.transcript, snapshots[0])
         self.assertEqual(self.vin_app.messages, exchange)
-        self.console.print.assert_not_called()
-        self.console.clear.assert_not_called()
+        self.console_print.assert_not_called()
+        self.console_clear.assert_not_called()
         self.save.assert_not_called()
-        self.assertEqual(self.vin_app.app.run_async.await_count, 1)
+        self.assertEqual(mock_run(self.vin_app.app).await_count, 1)
 
 
-    def test_failed_model_save_returns_to_input(self):
+    def test_failed_model_save_returns_to_input(self) -> None:
         self.save.side_effect = RuntimeError("Could not save model preference")
         self.run_chat(["/model", "/quit"])
 
-        self.assertEqual(self.session.prompt_async.await_count, 2)
+        self.assertEqual(mock_prompt(self.session).await_count, 2)
         self.assert_error_notice("Could not save model preference", command="/model")
         self.assert_model_indicator(" ChatGPT · Old Model")

@@ -7,7 +7,7 @@ from vin.provider import preferences
 
 
 class ModelPreferenceTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.destination = Path(self.directory.name) / "preferences.json"
@@ -18,7 +18,7 @@ class ModelPreferenceTests(unittest.TestCase):
         self.addCleanup(location.stop)
 
 
-    def test_saved_preference_can_be_loaded(self):
+    def test_saved_preference_can_be_loaded(self) -> None:
         preferences.save_model_preference("chatgpt", "test-model")
 
         self.assertEqual(
@@ -26,7 +26,7 @@ class ModelPreferenceTests(unittest.TestCase):
             {"provider": "chatgpt", "model": "test-model"},
         )
 
-    def test_invalid_saved_data_is_rejected(self):
+    def test_invalid_saved_data_is_rejected(self) -> None:
         bodies = [
             "not JSON",
             "[]",
@@ -45,7 +45,7 @@ class ModelPreferenceTests(unittest.TestCase):
                     preferences.load_model_preference()
 
 
-    def test_failed_save_preserves_previous_preference(self):
+    def test_failed_save_preserves_previous_preference(self) -> None:
         preferences.save_model_preference("chatgpt", "old-model")
         original = self.destination.read_bytes()
 

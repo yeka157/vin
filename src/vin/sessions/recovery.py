@@ -1,3 +1,6 @@
+from typing import cast
+from vin.types import History, Pathish, SessionRecord, TranscriptEntry
+
 from copy import deepcopy
 
 from rich.text import Text
@@ -5,11 +8,11 @@ from vin.sessions.records import validate_session
 from vin.sessions.transcript import decode_transcript
 
 
-def restore_session(record, project_dir):
+def restore_session(record: SessionRecord, project_dir: Pathish) -> tuple[History, list[TranscriptEntry]]:
     validate_session(record, project_dir)
 
     messages = deepcopy(record["messages"])
-    transcript = decode_transcript(deepcopy(record["transcript"]))
+    transcript = cast(list[TranscriptEntry], decode_transcript(deepcopy(record["transcript"])))
 
     if record["active_turn"] is not None:
         if record["active_turn"]["tools_used"]:

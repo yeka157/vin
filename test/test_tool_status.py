@@ -2,40 +2,49 @@
 
 import asyncio
 from threading import Event
-from types import SimpleNamespace
+from collections.abc import Callable
+from typing import Literal
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
+from prompt_toolkit import PromptSession
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.input import DummyInput
+from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.document import Document
 from prompt_toolkit.keys import Keys
 
 from vin.tui import app as app_module, bindings
+from vin.provider.events import ReplyEvents, ToolEventKind
+from vin.types import Credentials, History
+from rich.text import Text
+from test.tui_typing_helpers import key_event
 
 
 class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.owner = app_module.VinApp()
         self.assertTrue(hasattr(self.owner, "tool_status"), "Initialize VinApp.tool_status to None.")
         self.assertIsNone(self.owner.tool_status)
         self.draft = Document("next draft", cursor_position=3)
-        self.owner.session = SimpleNamespace(app=Mock(), default_buffer=Buffer(document=self.draft))
+        self.owner.session = PromptSession(input=DummyInput(), output=DummyOutput())
+        self.owner.session.default_buffer = Buffer(document=self.draft)
 
-    async def wait_until(self, predicate):
+    async def wait_until(self, predicate: Callable[[], bool]) -> None:
         async with asyncio.timeout(2):
             while not predicate():
                 await asyncio.sleep(.001)
 
-    def start(self):
+    def start(self) -> asyncio.Task[str | None]:
         task = asyncio.create_task(self.owner.stream_reply("Inspect the file"))
         self.owner.pending_reply = task
         return task
 
-    async def test_repeated_edits_retain_their_own_diffs_separately_from_assistant_text(self):
+    async def test_repeated_edits_retain_their_own_diffs_separately_from_assistant_text(self) -> None:
         first = "--- f\n+++ f\n@@ -1 +1 @@\n-before\n+middle\n"
         second = "--- f\n+++ f\n@@ -1 +1 @@\n-middle\n+after\n"
 
-        def worker(credentials, model, messages, events, cancel_event):
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
             events.tools_used.set()
             for diff in (first, second):
                 events.put(("tool_started", {"name": "edit", "detail": "f"}))
@@ -56,17 +65,20 @@ class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.owner.session.default_buffer.document, self.draft)
 
 
-    async def test_running_and_terminal_status_preserve_editable_draft(self):
-        for terminal, expected in (("tool_finished", "finished"), ("tool_failed", "failed")):
+    async def test_running_and_terminal_status_preserve_editable_draft(self) -> None:
+        terminals: list[tuple[Literal["tool_finished", "tool_failed"], str]] = [("tool_finished", "finished"), ("tool_failed", "failed")]
+        terminal: ToolEventKind
+        for terminal, expected in terminals:
             with self.subTest(terminal=terminal):
                 previous_rows = [entry for entry in self.owner.transcript if entry["role"] == "tool"]
                 release_status, release_answer, stopped = Event(), Event(), Event()
-                def worker(credentials, model, messages, events, cancel_event):
+                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
                     try:
                         events.tools_used.set()
                         events.put(("tool_started", "read"))
                         release_status.wait(2)
-                        events.put((terminal, "read"))
+                        terminal_event: tuple[ToolEventKind, str] = (terminal, "read")
+                        events.put(terminal_event)
                         release_answer.wait(2)
                         events.put(("text", "Done"))
                         events.put(("complete", None))
@@ -107,11 +119,11 @@ class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
                         await self.wait_until(stopped.is_set)
                         self.owner.session.default_buffer.set_document(self.draft)
 
-    async def test_task_and_keyboard_cancellation_finish_running_status(self):
+    async def test_task_and_keyboard_cancellation_finish_running_status(self) -> None:
         for keyboard in (False, True):
             with self.subTest(keyboard=keyboard):
                 release, stopped = Event(), Event()
-                def worker(credentials, model, messages, events, cancel_event):
+                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
                     try:
                         events.tools_used.set()
                         events.put(("tool_started", {"name": "bash", "detail": "printf '[red]hello[/red]'"}))
@@ -127,7 +139,7 @@ class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
                         if keyboard:
                             keys = bindings.create_bindings(self.owner)
                             keys.get_bindings_for_keys((Keys.ControlC,))[-1].handler(
-                                SimpleNamespace(app=self.owner.session.app))
+                                key_event(self.owner.session.app, Keys.ControlC))
                         else:
                             task.cancel()
                         with self.assertRaises(asyncio.CancelledError):
@@ -137,7 +149,9 @@ class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(tool_row.get("status"), "interrupted")
                         self.assertIn("printf '[red]hello[/red]'", str(tool_row["content"]))
                         self.assertNotIn("running", str(tool_row["content"]))
-                        self.assertEqual(tool_row["content"].style, "yellow")
+                        content = tool_row["content"]
+                        assert isinstance(content, Text)
+                        self.assertEqual(content.style, "yellow")
                         interrupted_content = str(tool_row["content"])
                         release.set()
                         await self.wait_until(stopped.is_set)

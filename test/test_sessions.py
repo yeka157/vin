@@ -1,6 +1,6 @@
 """Project identity for independently stored conversation sessions."""
 
-import importlib
+from contextlib import AbstractContextManager
 from copy import deepcopy
 import json
 import os
@@ -14,8 +14,11 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
+from vin.sessions import storage
+from vin.types import Pathish, SessionRecord
 
-def probe_file_lock(path):
+
+def probe_file_lock(path: Pathish) -> str:
     """Try an OS lock from another process without blocking or timing sleeps."""
     script = '''
 import fcntl
@@ -34,26 +37,18 @@ with open(sys.argv[1], "a") as lock:
 
 
 class SessionProjectIdentityTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
 
-    def key(self, directory):
-        try:
-            storage = importlib.import_module("vin.sessions.storage")
-        except ModuleNotFoundError as error:
-            if error.name not in ("vin.sessions", "vin.sessions.storage"):
-                raise
-            self.fail("Create src/vin/sessions/storage.py with project_key(project_dir).")
-        helper = getattr(storage, "project_key", None)
-        self.assertTrue(callable(helper), "Add project_key(project_dir) in vin.sessions.storage.")
-        key = helper(directory)
+    def key(self, directory: Pathish) -> str:
+        key = storage.project_key(directory)
         self.assertIsInstance(key, str, "project_key must return a hexadecimal string.")
         self.assertRegex(key, r"\A[0-9a-f]{64}\Z")
         return key
 
-    def test_same_named_projects_in_different_locations_have_distinct_keys(self):
+    def test_same_named_projects_in_different_locations_have_distinct_keys(self) -> None:
         first = self.root / "repository" / "vin"
         second = self.root / "experiments" / "vin"
         first.mkdir(parents=True)
@@ -64,7 +59,7 @@ class SessionProjectIdentityTests(unittest.TestCase):
 
         self.assertNotEqual(first_key, second_key)
 
-    def test_equivalent_path_forms_keep_the_same_project_identity(self):
+    def test_equivalent_path_forms_keep_the_same_project_identity(self) -> None:
         project = self.root / "project with spaces"
         child = project / "child"
         child.mkdir(parents=True)
@@ -77,25 +72,23 @@ class SessionProjectIdentityTests(unittest.TestCase):
 
 
 class SessionFilePathTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.destination = self.root / "session-data"
         self.project = self.root / "project"
         self.project.mkdir()
-        self.storage = importlib.import_module("vin.sessions.storage")
+        self.storage = storage
         location = patch.object(self.storage, "SESSIONS_DIR", self.destination, create=True)
         location.start()
         self.addCleanup(location.stop)
 
-    def path(self, project, session_id):
-        helper = getattr(self.storage, "session_path", None)
-        self.assertTrue(callable(helper), "Add session_path(project_dir, session_id) in storage.py.")
-        return helper(project, session_id)
+    def path(self, project: Pathish, session_id: object) -> Path:
+        return self.storage.session_path(project, session_id)
 
 
-    def test_invalid_or_noncanonical_ids_cannot_become_session_paths(self):
+    def test_invalid_or_noncanonical_ids_cannot_become_session_paths(self) -> None:
         session_id = "12345678-1234-4abc-8def-123456789abc"
         for invalid in (
             None, 42, "", "../outside", f"../{session_id}",
@@ -110,7 +103,7 @@ class SessionFilePathTests(unittest.TestCase):
 
 
 class SessionSaveTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         from vin.sessions import storage
         from vin.sessions.records import new_session
 
@@ -126,12 +119,11 @@ class SessionSaveTests(unittest.TestCase):
         self.addCleanup(location.stop)
         self.record = new_session(self.project, "Review the queue")
 
-    def save(self, record, **kwargs):
-        helper = getattr(self.storage, "save_session", None)
-        self.assertTrue(callable(helper), "Add save_session(project_dir, record) in storage.py.")
-        return helper(self.project, record, **kwargs)
+    def save(self, record: SessionRecord, *, expected_record: SessionRecord | None = None) -> Path:
+        return self.storage.save_session(self.project, record, expected_record=expected_record)
 
-    def test_save_writes_private_json_at_the_session_path_without_mutation(self):
+
+    def test_save_writes_private_json_at_the_session_path_without_mutation(self) -> None:
         from rich.text import Text
         from vin.sessions.transcript import encode_transcript
 
@@ -157,10 +149,11 @@ class SessionSaveTests(unittest.TestCase):
         self.assertEqual(set(expected.parent.iterdir()), {expected, expected.with_suffix(".lock")})
 
 
-    def test_failed_atomic_replacement_preserves_previous_file_and_cleans_temporary(self):
+    def test_failed_atomic_replacement_preserves_previous_file_and_cleans_temporary(self) -> None:
         path = self.save(self.record)
         previous = path.read_bytes()
-        changed = dict(self.record, name="Renamed session")
+        changed = self.record.copy()
+        changed["name"] = "Renamed session"
 
         with patch("os.replace", side_effect=OSError("Replacement failed")):
             with self.assertRaises(RuntimeError) as error:
@@ -174,7 +167,7 @@ class SessionSaveTests(unittest.TestCase):
 
 
 class SessionLoadTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         from vin.sessions import storage
         from vin.sessions.records import new_session
 
@@ -190,13 +183,11 @@ class SessionLoadTests(unittest.TestCase):
         self.addCleanup(location.stop)
         self.record = new_session(self.project, "Review the queue")
 
-    def load(self, session_id):
-        helper = getattr(self.storage, "load_session", None)
-        self.assertTrue(callable(helper), "Add load_session(project_dir, session_id) in storage.py.")
-        return helper(self.project, session_id)
+    def load(self, session_id: object) -> SessionRecord | None:
+        return self.storage.load_session(self.project, session_id)
 
 
-    def test_corrupt_invalid_or_mismatched_records_raise_session_errors(self):
+    def test_corrupt_invalid_or_mismatched_records_raise_session_errors(self) -> None:
         path = self.storage.save_session(self.project, self.record)
         cases = ["{broken", "[]", json.dumps(dict(self.record, version=2)),
                  json.dumps(dict(self.record, id=str(uuid4()))),
@@ -211,7 +202,7 @@ class SessionLoadTests(unittest.TestCase):
                 self.assertIn("session", str(error.exception).lower())
                 self.assertEqual(path.read_text(encoding="utf-8"), contents)
 
-    def test_nonprivate_or_foreign_owned_session_is_rejected(self):
+    def test_nonprivate_or_foreign_owned_session_is_rejected(self) -> None:
         path = self.storage.save_session(self.project, self.record)
         for mode in (0o644, 0o620):
             with self.subTest(mode=oct(mode)):
@@ -226,7 +217,7 @@ class SessionLoadTests(unittest.TestCase):
 
 
 class SessionListTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         from vin.sessions import storage
 
         temporary = TemporaryDirectory()
@@ -240,19 +231,18 @@ class SessionListTests(unittest.TestCase):
         location.start()
         self.addCleanup(location.stop)
 
-    def listing(self):
-        helper = getattr(self.storage, "list_sessions", None)
-        self.assertTrue(callable(helper), "Add list_sessions(project_dir) in storage.py.")
-        return helper(self.project)
+    def listing(self) -> list[SessionRecord]:
+        return self.storage.list_sessions(self.project)
 
-    def record(self, project=None):
+
+    def record(self, project: Pathish | None = None) -> SessionRecord:
         from vin.sessions.records import new_session
 
         return new_session(self.project if project is None else project, "Same name")
 
 
-    def test_only_current_project_sessions_are_listed_newest_first_by_instant(self):
-        records = []
+    def test_only_current_project_sessions_are_listed_newest_first_by_instant(self) -> None:
+        records: list[SessionRecord] = []
         for number, updated in ((1, "2026-10-24T10:00:00+00:00"),
                                 (2, "2026-10-24T16:00:00+07:00"),
                                 (3, "2026-10-24T10:00:00Z")):
@@ -276,7 +266,7 @@ class SessionListTests(unittest.TestCase):
 
 
 class SessionLockTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         from vin.sessions import storage
 
         temporary = TemporaryDirectory()
@@ -291,15 +281,14 @@ class SessionLockTests(unittest.TestCase):
         self.addCleanup(location.stop)
         self.session_id = str(uuid4())
 
-    def lock(self, session_id=None):
-        helper = getattr(self.storage, "session_lock", None)
-        self.assertTrue(callable(helper), "Add session_lock(project_dir, session_id) in storage.py.")
-        return helper(self.project, self.session_id if session_id is None else session_id)
+    def lock(self, session_id: object = None) -> AbstractContextManager[None]:
+        return self.storage.session_lock(self.project, self.session_id if session_id is None else session_id)
 
-    def probe(self, path):
+
+    def probe(self, path: Pathish) -> str:
         return probe_file_lock(path)
 
-    def test_private_lock_excludes_other_process_until_context_exits(self):
+    def test_private_lock_excludes_other_process_until_context_exits(self) -> None:
         path = self.storage.session_path(self.project, self.session_id)
         lock_path = path.with_suffix(".lock")
 
@@ -314,7 +303,7 @@ class SessionLockTests(unittest.TestCase):
 
 
 class SessionConflictTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         from vin.sessions import storage
         from vin.sessions.records import new_session
 
@@ -329,10 +318,11 @@ class SessionConflictTests(unittest.TestCase):
         self.addCleanup(location.stop)
         self.record = new_session(self.project, "Review the queue")
 
-    def test_update_requires_exact_previous_record_and_preserves_inputs(self):
+    def test_update_requires_exact_previous_record_and_preserves_inputs(self) -> None:
         path = self.storage.save_session(self.project, self.record)
         baseline = deepcopy(self.record)
-        updated = dict(self.record, name="Renamed session")
+        updated = self.record.copy()
+        updated["name"] = "Renamed session"
         original_updated = deepcopy(updated)
 
         result = self.storage.save_session(self.project, updated, expected_record=baseline)
@@ -342,15 +332,17 @@ class SessionConflictTests(unittest.TestCase):
         self.assertEqual(baseline, self.record)
         self.assertEqual(updated, original_updated)
         previous = path.read_bytes()
+        stale = updated.copy()
+        stale["name"] = "Stale"
         for kwargs in ({}, {"expected_record": baseline}):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(RuntimeError) as error:
-                    self.storage.save_session(self.project, dict(updated, name="Stale"), **kwargs)
+                    self.storage.save_session(self.project, stale, **kwargs)
                 self.assertIn("changed", str(error.exception).lower())
                 self.assertEqual(path.read_bytes(), previous)
         self.assertEqual(probe_file_lock(path.with_suffix(".lock")), "acquired")
 
-    def test_another_process_update_cannot_be_overwritten_by_stale_parent(self):
+    def test_another_process_update_cannot_be_overwritten_by_stale_parent(self) -> None:
         path = self.storage.save_session(self.project, self.record)
         script = '''
 import json
@@ -367,14 +359,16 @@ storage.save_session(sys.argv[2], updated, expected_record=baseline)
         self.assertEqual(child.returncode, 0, child.stderr)
         previous = path.read_bytes()
         with self.assertRaises(RuntimeError) as error:
-            self.storage.save_session(self.project, dict(self.record, name="Stale parent"),
+            stale = self.record.copy()
+            stale["name"] = "Stale parent"
+            self.storage.save_session(self.project, stale,
                                       expected_record=self.record)
         self.assertIn("changed", str(error.exception).lower())
         self.assertEqual(path.read_bytes(), previous)
         self.assertEqual(json.loads(previous)["name"], "Saved by another process")
 
 
-    def test_expected_existing_record_cannot_recreate_missing_or_overwrite_corrupt_file(self):
+    def test_expected_existing_record_cannot_recreate_missing_or_overwrite_corrupt_file(self) -> None:
         path = self.storage.save_session(self.project, self.record)
         path.unlink()
         with self.assertRaises(RuntimeError):

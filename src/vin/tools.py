@@ -1,4 +1,6 @@
-from collections.abc import Iterator
+__all__ = ["LAUNCH_DIR", "MAX_FILE_BYTES", "MAX_OUTPUT_CHARS", "FILE_MUTATION_LOCK", "TOOL_REGISTRY", "read", "write", "edit", "bash", "_tool_cancellation", "_response_tools", "_check_cancelled", "_truncate_output"]
+
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 import difflib
@@ -14,6 +16,7 @@ from threading import Event, Lock
 import time
 import unicodedata
 from aisuite.utils.tools import Tools
+from openai.types.responses import FunctionToolParam
 
 LAUNCH_DIR = Path.cwd().resolve()
 MAX_FILE_BYTES = 2_000_000
@@ -25,7 +28,7 @@ _TOOL_CANCEL_EVENT: ContextVar[Event | None] = ContextVar(
 
 
 @contextmanager
-def _tool_cancellation(cancel_event: Event) -> Iterator[None]:
+def _tool_cancellation(cancel_event: Event) -> Generator[None]:
     token = _TOOL_CANCEL_EVENT.set(cancel_event)
 
     try:
@@ -313,7 +316,7 @@ def edit(path: str, old_text: str, new_text: str) -> str:
         return _truncate_output(diff)
 
 
-def _stop_process_group(process: subprocess.Popen) -> None:
+def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -342,6 +345,7 @@ def bash(command: str, timeout: int = 30) -> str:
         env=environment,
     )
 
+    assert process.stdout is not None
     output = bytearray()
     capture_limit = MAX_OUTPUT_CHARS * 4
     timed_out = False
@@ -389,8 +393,8 @@ def bash(command: str, timeout: int = 30) -> str:
 TOOL_REGISTRY = Tools([read, write, edit, bash])
 
 
-def _response_tools() -> list[dict]:
-    schemas = []
+def _response_tools() -> list[FunctionToolParam]:
+    schemas: list[FunctionToolParam] = []
 
     for tool in TOOL_REGISTRY.tools():
         function = tool["function"]

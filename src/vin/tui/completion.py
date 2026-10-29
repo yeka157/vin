@@ -1,4 +1,5 @@
 from typing import Iterable
+from pathlib import Path
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
 
@@ -6,7 +7,7 @@ from vin.sessions.storage import list_sessions
 
 
 class SessionCompleter(Completer):
-    def __init__(self, project_dir, commands) -> None:
+    def __init__(self, project_dir: str | Path, commands: Completer) -> None:
         self.project_dir = project_dir
         self.commands = commands
 

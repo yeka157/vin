@@ -2,19 +2,26 @@
 
 import asyncio
 from collections import deque
-from queue import Empty, SimpleQueue
+from queue import Empty
 from threading import Event, Thread
 from time import monotonic
 from datetime import datetime
+from pathlib import Path
+from typing import Literal
+from collections.abc import Sequence
 
+from prompt_toolkit import Application, PromptSession
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Window
+from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.layout import Container, HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import choice
 from prompt_toolkit.widgets import RadioList
 from rich.markdown import Markdown
+from rich.console import RenderableType
 from rich.padding import Padding
 from rich.text import Text
 
@@ -34,17 +41,30 @@ from vin.provider.preferences import load_model_preference, save_model_preferenc
 from vin.sessions.records import new_session
 from vin.tools import LAUNCH_DIR
 from vin.tui import conversations
-from vin.tui.constants import COMMANDS, PROVIDER_LABELS, is_command
+from vin.tui.constants import PROVIDER_LABELS, is_command
 from vin.tui.layout import build_workspace
 from vin.tui.transcript import TranscriptControl, format_duration, render_transcript
 from vin.provider.events import ReplyEvents
+from vin.types import (
+    AccountRecord, ActiveTurn, AssistantEntry, Credentials, Registration, History, ModelMetadata,
+    ModelPreference, SessionRecord, ToolEntry, TranscriptEntry,
+)
 
 
-def create_choice_menu(message, options, default=None):
+def _task_is_cancelling() -> bool:
+    task = asyncio.current_task()
+    return task is not None and bool(task.cancelling())
+
+
+def create_choice_menu(
+    message: str,
+    options: Sequence[tuple[str, str]],
+    default: str | None = None,
+) -> tuple[RadioList[str], HSplit]:
     if not options:
         raise RuntimeError("No choices are available.")
 
-    choices = RadioList(
+    choices: RadioList[str] = RadioList(
         values=options,
         default=default,
         select_on_focus=True,
@@ -72,11 +92,11 @@ def create_choice_menu(message, options, default=None):
     return choices, container
 
 
-def choose_login_method():
+def choose_login_method() -> str:
     bindings = KeyBindings()
 
     @bindings.add("c-d")
-    def exit_menu(event):
+    def exit_menu(event: KeyPressEvent) -> None:
         event.app.exit(exception=EOFError())
 
     return choice(
@@ -87,14 +107,14 @@ def choose_login_method():
     )
 
 
-def choose_chatgpt_model(models):
+def choose_chatgpt_model(models: Sequence[ModelMetadata]) -> str:
     if not models:
         raise RuntimeError("No ChatGPT models are available for this account.")
 
     bindings = KeyBindings()
 
     @bindings.add("c-d")
-    def exit_menu(event):
+    def exit_menu(event: KeyPressEvent) -> None:
         event.app.exit(exception=EOFError())
 
     return choice(
@@ -105,15 +125,17 @@ def choose_chatgpt_model(models):
     )
 
 
-def model_display_name(models, slug):
+def model_display_name(models: Sequence[ModelMetadata], slug: str) -> str:
     return next(
         (model["display_name"] for model in models if model["slug"] == slug),
         slug,
     )
 
 
-def restore_chatgpt_model(transcript, models):
-    preference = get_chatgpt_model_preference(transcript, models)
+def restore_chatgpt_model(
+    transcript: list[TranscriptEntry], models: Sequence[ModelMetadata]
+) -> ModelPreference:
+    preference: ModelPreference | None = get_chatgpt_model_preference(transcript, models)
     if preference is None:
         selected_model = choose_chatgpt_model(models)
         preference = {"provider": "chatgpt", "model": selected_model}
@@ -121,7 +143,9 @@ def restore_chatgpt_model(transcript, models):
     return preference
 
 
-def get_chatgpt_model_preference(transcript, models):
+def get_chatgpt_model_preference(
+    transcript: list[TranscriptEntry], models: Sequence[ModelMetadata]
+) -> ModelPreference | None:
     preference = load_model_preference()
     if preference is None:
         return None
@@ -142,41 +166,46 @@ def get_chatgpt_model_preference(transcript, models):
 
 
 class VinApp:
-    def __init__(self) -> None:
-        self.credentials = None
-        self.models = []
-        self.selected_provider = None
-        self.selected_model = None
-        self.messages = []
-        self.transcript = []
-        self.transcript_control = TranscriptControl(self.get_transcript_entries)
-        self.pending_reply = None
-        self.loading_model = False
-        self.submitted = asyncio.Queue()
-        self.choice_menu = None
-        self.choices = None
-        self.choice_future = None
-        self.pending_model_load = None
-        self.auth_status = None
-        self.pending_auth = None
-        self.reply_entry = None
-        self.queued_prompts = deque()
-        self.queue_paused = False
-        self.request_started_at = None
-        self.last_request_duration = None
-        self.tool_status = None
-        self._credential_refresh = None
-        self.project_dir = LAUNCH_DIR
-        self.session_record = None
-        self.saved_session_record = None
-        self.active_turn = None
-        self.last_session_checkpoint = None
-        self.session_save_error = None
+    session: PromptSession[str]
+    app: Application[str]
+    input_window: Window
+    header: Markdown
 
-    def checkpoint_session(self, *, force=False):
+    def __init__(self) -> None:
+        self.credentials: AccountRecord | None = None
+        self.models: list[ModelMetadata] = []
+        self.selected_provider: Literal["chatgpt"] | None = None
+        self.selected_model: str | None = None
+        self.messages: History = []
+        self.transcript: list[TranscriptEntry] = []
+        self.transcript_control = TranscriptControl(self.get_transcript_entries)
+        self.pending_reply: asyncio.Task[Literal["error", "rate_limit"] | None] | None = None
+        self.loading_model = False
+        self.submitted: asyncio.Queue[str | None] = asyncio.Queue()
+        self.choice_menu: Container | None = None
+        self.choices: RadioList[str] | None = None
+        self.choice_future: asyncio.Future[str | None] | None = None
+        self.pending_model_load: asyncio.Task[list[ModelMetadata]] | None = None
+        self.auth_status: str | None = None
+        self.pending_auth: asyncio.Task[None] | None = None
+        self.reply_entry: AssistantEntry | None = None
+        self.queued_prompts: deque[str] = deque()
+        self.queue_paused = False
+        self.request_started_at: float | None = None
+        self.last_request_duration: float | None = None
+        self.tool_status: tuple[str, Literal["running", "finished", "failed"]] | None = None
+        self._credential_refresh: asyncio.Task[Credentials] | None = None
+        self.project_dir: Path = LAUNCH_DIR
+        self.session_record: SessionRecord | None = None
+        self.saved_session_record: SessionRecord | None = None
+        self.active_turn: ActiveTurn | None = None
+        self.last_session_checkpoint: float | None = None
+        self.session_save_error: str | None = None
+
+    def checkpoint_session(self, *, force: bool = False) -> bool:
         return conversations.checkpoint_session(self, force=force)
 
-    def get_transcript_entries(self):
+    def get_transcript_entries(self) -> list[TranscriptEntry]:
         entries = list(self.transcript)
         if self.request_started_at is not None:
             now = monotonic()
@@ -194,14 +223,15 @@ class VinApp:
             )
         return entries
 
-    async def prepare_request_credentials(self):
+    async def prepare_request_credentials(self) -> AccountRecord | None:
         if not self.credentials or not self.credentials.get("access_token"):
             return self.credentials
 
+        assert "access_token" in self.credentials
         if self._credential_refresh is None:
             original = self.credentials
 
-            async def refresh():
+            async def refresh() -> Credentials:
                 updated = await asyncio.to_thread(refresh_credentials, original)
                 if self.credentials is not original:
                     raise RuntimeError("ChatGPT session changed during token refresh.")
@@ -211,7 +241,7 @@ class VinApp:
             task = asyncio.create_task(refresh())
             self._credential_refresh = task
 
-            def finish(done):
+            def finish(done: asyncio.Task[Credentials]) -> None:
                 # A cancelled waiter must not cancel a rotating-token exchange.
                 if not done.cancelled():
                     done.exception()
@@ -222,7 +252,12 @@ class VinApp:
 
         return await asyncio.shield(self._credential_refresh)
 
-    async def choose_inline(self, message, options, default=None):
+    async def choose_inline(
+        self,
+        message: str,
+        options: Sequence[tuple[str, str]],
+        default: str | None = None,
+    ) -> str:
         if self.choice_future is not None:
             raise RuntimeError("A choice is already open")
 
@@ -232,7 +267,9 @@ class VinApp:
         try:
             self.session.layout.focus(self.choices)
             self.session.app.invalidate()
-            return await self.choice_future
+            selected = await self.choice_future
+            assert selected is not None
+            return selected
         finally:
             self.choices = None
             self.choice_menu = None
@@ -240,7 +277,7 @@ class VinApp:
             self.session.layout.focus(self.input_window)
             self.session.app.invalidate()
 
-    async def show_panel(self, content):
+    async def show_panel(self, content: RenderableType) -> None:
         if self.choice_future is not None:
             raise RuntimeError("A panel is already open")
 
@@ -278,7 +315,7 @@ class VinApp:
             self.app.invalidate()
             await self.choice_future
         except asyncio.CancelledError:
-            if asyncio.current_task().cancelling():
+            if _task_is_cancelling():
                 raise
         finally:
             self.choice_menu = None
@@ -286,7 +323,7 @@ class VinApp:
             self.session.layout.focus(self.input_window)
             self.app.invalidate()
 
-    def accept_input(self, buffer):
+    def accept_input(self, buffer: Buffer) -> bool:
         text = buffer.text
         if is_command(text):
             self.submitted.put_nowait(text)
@@ -297,10 +334,10 @@ class VinApp:
             self.submitted.put_nowait(None)
         return False
 
-    async def stream_reply(self, text):
+    async def stream_reply(self, text: str) -> Literal["error", "rate_limit"] | None:
         events = ReplyEvents()
         cancel_event = Event()
-        entry = {"role": "assistant", "content": "", "streaming": True}
+        entry: AssistantEntry = {"role": "assistant", "content": "", "streaming": True}
         request = [message.copy() for message in self.messages]
         request.append({"role": "user", "content": text})
         self.reply_entry = entry
@@ -308,7 +345,7 @@ class VinApp:
         self.last_request_duration = None
         completed = False
         text_dirty = False
-        tool_entry = None
+        tool_entry: ToolEntry | None = None
         self.tool_status = None
 
         try:
@@ -337,32 +374,36 @@ class VinApp:
 
             while True:
                 try:
-                    kind, value = events.get_nowait()
+                    event = events.get_nowait()
+                    kind = event[0]
                 except Empty:
                     if text_dirty and self.checkpoint_session():
                         text_dirty = False
                     await asyncio.sleep(0.03)
                     continue
 
-                if kind == "text":
+                if event[0] == "text":
                     if not entry["content"]:
                         self.transcript.append(entry)
-                    entry["content"] += value
+                    entry["content"] += event[1]
                     text_dirty = True
-                elif kind == "tool_diff":
+                elif event[0] == "tool_diff":
                     if tool_entry is not None and tool_entry["name"] == "edit":
-                        tool_entry["diff"] = value
-                elif kind in ("tool_started", "tool_finished", "tool_failed"):
+                        tool_entry["diff"] = event[1]
+                elif (
+                    event[0] == "tool_started"
+                    or event[0] == "tool_finished"
+                    or event[0] == "tool_failed"
+                ):
+                    value = event[1]
                     name = value["name"] if isinstance(value, dict) else value
                     detail = value.get("detail", "") if isinstance(value, dict) else ""
-                    self.tool_status = (
-                        name,
-                        {
-                            "tool_started": "running",
-                            "tool_finished": "finished",
-                            "tool_failed": "failed",
-                        }[kind],
+                    state: Literal["running", "finished", "failed"] = (
+                        "running" if kind == "tool_started"
+                        else "finished" if kind == "tool_finished"
+                        else "failed"
                     )
+                    self.tool_status = (name, state)
                     if kind == "tool_started":
                         entry["intermediate"] = True
                         entry["streaming"] = False
@@ -379,14 +420,15 @@ class VinApp:
                         }
                         self.transcript.append(tool_entry)
                     elif tool_entry is not None:
-                        state = self.tool_status[1]
+                        assert "label" in tool_entry
                         tool_entry["status"] = state
                         tool_entry["content"] = Text(
                             f"● {tool_entry['label']} · {state}",
                             style="red" if kind == "tool_failed" else "dim",
                         )
                         tool_entry = None
-                elif kind == "complete":
+                elif event[0] == "complete":
+                    value = event[1]
                     entry["streaming"] = False
                     if value is None:
                         self.messages.extend(
@@ -399,11 +441,11 @@ class VinApp:
                         self.messages[:] = value
                     completed = True
                     return
-                elif kind in ("error", "rate_limit"):
+                elif event[0] == "error" or event[0] == "rate_limit":
                     self.transcript.append(
-                        {"role": "notice", "content": Text(value, style="red")}
+                        {"role": "notice", "content": Text(event[1], style="red")}
                     )
-                    return kind
+                    return event[0]
 
                 if kind in (
                     "tool_started",
@@ -424,11 +466,14 @@ class VinApp:
         finally:
             cancel_event.set()
             if not completed and tool_entry is not None:
-                interrupted = bool(asyncio.current_task().cancelling())
-                state = "interrupted" if interrupted else "failed"
-                tool_entry["status"] = state
+                assert "label" in tool_entry
+                interrupted = _task_is_cancelling()
+                interrupted_state: Literal["interrupted", "failed"] = (
+                    "interrupted" if interrupted else "failed"
+                )
+                tool_entry["status"] = interrupted_state
                 tool_entry["content"] = Text(
-                    f"● {tool_entry['label']} · {state}",
+                    f"● {tool_entry['label']} · {interrupted_state}",
                     style="yellow" if interrupted else "red",
                 )
             if not completed and events.tools_used.is_set():
@@ -452,6 +497,7 @@ class VinApp:
                     and self.tool_status[1] == "running"
                 ):
                     self.tool_status = (self.tool_status[0], "failed")
+                assert self.request_started_at is not None
                 self.last_request_duration = monotonic() - self.request_started_at
                 if completed:
                     finished_at = datetime.now().astimezone().strftime("%I:%M %p")
@@ -466,7 +512,7 @@ class VinApp:
                         }
                     )
                 else:
-                    interrupted = bool(asyncio.current_task().cancelling())
+                    interrupted = _task_is_cancelling()
                     label = "Interrupted" if interrupted else "Failed"
                     self.transcript.append(
                         {
@@ -484,13 +530,13 @@ class VinApp:
                 self.reply_entry = None
             self.session.app.invalidate()
 
-    async def resume_conversation(self, query=None):
+    async def resume_conversation(self, query: str | None = None) -> str | None:
         return await conversations.resume_conversation(self, query)
 
-    def rename_conversation(self, name):
+    def rename_conversation(self, name: object) -> str | None:
         return conversations.rename_conversation(self, name)
 
-    async def change_model(self):
+    async def change_model(self) -> str | None:
         if not self.credentials or not self.credentials.get("access_token"):
             return "Sign in with /login before choosing a model."
 
@@ -509,7 +555,7 @@ class VinApp:
                 models = await task
                 self.models = models
             except asyncio.CancelledError:
-                if asyncio.current_task().cancelling():
+                if _task_is_cancelling():
                     raise
                 return
             finally:
@@ -529,7 +575,7 @@ class VinApp:
                 default=self.selected_model,
             )
         except asyncio.CancelledError:
-            if asyncio.current_task().cancelling():
+            if _task_is_cancelling():
                 raise
             return
 
@@ -541,7 +587,7 @@ class VinApp:
         model_name = model_display_name(self.models, self.selected_model)
         return f"Model: {provider_name} · {model_name}"
 
-    async def run_auth_command(self, text):
+    async def run_auth_command(self, text: str) -> None:
         self.loading_model = True
         task = asyncio.create_task(
             self.initialize_session(sign_in=True)
@@ -554,7 +600,7 @@ class VinApp:
         try:
             await task
         except asyncio.CancelledError:
-            if asyncio.current_task().cancelling():
+            if _task_is_cancelling():
                 raise
         finally:
             self.pending_auth = None
@@ -562,13 +608,13 @@ class VinApp:
             self.loading_model = False
             self.app.invalidate()
 
-    async def sign_out(self, *, announce=True):
-        credentials = None
-        notices = []
+    async def sign_out(self, *, announce: bool = True) -> None:
+        credentials: AccountRecord | None = None
+        notices: list[str] = []
         self.auth_status = "Signing out…"
         self.app.invalidate()
 
-        async def finish_sign_out():
+        async def finish_sign_out() -> Registration | None:
             nonlocal credentials
             if self._credential_refresh is not None:
                 try:
@@ -576,7 +622,7 @@ class VinApp:
                 except Exception:
                     pass
             credentials = (
-                dict(self.credentials) if self.credentials is not None else None
+                self.credentials.copy() if self.credentials is not None else None
             )
             return await asyncio.to_thread(
                 logout_chatgpt,
@@ -626,17 +672,17 @@ class VinApp:
         if cancelled:
             raise asyncio.CancelledError
 
-    async def chat_loop(self):
+    async def chat_loop(self) -> str:
 
         self.session.message = "❯ "
         self.session.default_buffer.accept_handler = self.accept_input
 
-        async def receive_messages():
+        async def receive_messages() -> None:
             if self.loading_model:
                 try:
                     await self.initialize_session()
                 except asyncio.CancelledError:
-                    if asyncio.current_task().cancelling():
+                    if _task_is_cancelling():
                         raise
                     self.app.exit(result="/quit")
                     return
@@ -729,15 +775,18 @@ class VinApp:
                         self.queue_paused = True
                         self.app.invalidate()
                 except asyncio.CancelledError:
-                    if asyncio.current_task().cancelling():
+                    if _task_is_cancelling():
                         raise
                     self.active_turn = None
                     self.checkpoint_session(force=True)
 
         with patch_stdout(raw=True):
+            def start_receiver() -> None:
+                self.app.create_background_task(receive_messages())
+
             try:
                 return await self.app.run_async(
-                    pre_run=lambda: self.app.create_background_task(receive_messages())
+                    pre_run=start_receiver
                 )
             finally:
                 task = self.pending_reply
@@ -749,13 +798,13 @@ class VinApp:
                         pass
                     self.pending_reply = None
 
-    def run_conversation(self):
+    def run_conversation(self) -> None:
         try:
             asyncio.run(self.chat_loop())
         except (KeyboardInterrupt, EOFError):
             pass
 
-    def handle_command(self, text):
+    def handle_command(self, text: str) -> Markdown | Text | None:
         if text == "/clear":
             self.session_record = None
             self.saved_session_record = None
@@ -793,7 +842,7 @@ class VinApp:
                 notice = "Signed out. Use /login to sign in"
             return Text(notice)
 
-    async def discover_chatgpt_models(self):
+    async def discover_chatgpt_models(self) -> list[ModelMetadata]:
         credentials = await self.prepare_request_credentials()
 
         models = await asyncio.to_thread(list_chatgpt_models, credentials)
@@ -801,7 +850,7 @@ class VinApp:
         save_cached_chatgpt_models(credentials, models)
         return models
 
-    async def load_initial_model(self):
+    async def load_initial_model(self) -> None:
         models = await self.discover_chatgpt_models()
         provider_name = PROVIDER_LABELS["chatgpt"]
         if not models:
@@ -809,7 +858,7 @@ class VinApp:
                 f"No {provider_name} models are available for this account."
             )
 
-        preference = get_chatgpt_model_preference(self.transcript, models)
+        preference: ModelPreference | None = get_chatgpt_model_preference(self.transcript, models)
         if preference is None:
             selected_model = await self.choose_inline(
                 f"Choose a {provider_name} model",
@@ -821,7 +870,7 @@ class VinApp:
         self.selected_provider = preference["provider"]
         self.selected_model = preference["model"]
 
-    async def initialize_session(self, *, sign_in=False):
+    async def initialize_session(self, *, sign_in: bool = False) -> None:
         if self.credentials is None and not sign_in:
             self.credentials = await asyncio.to_thread(load_active_session)
 
@@ -843,12 +892,12 @@ class VinApp:
             loop = asyncio.get_running_loop()
             cancel_event = Event()
 
-            def append_notice(message):
+            def append_notice(message: str) -> None:
                 if not cancel_event.is_set() and not self.app.is_done:
                     self.transcript.append({"role": "notice", "content": Text(message)})
                     self.app.invalidate()
 
-            def notify(message):
+            def notify(message: str) -> None:
                 if not cancel_event.is_set():
                     loop.call_soon_threadsafe(append_notice, message)
 
@@ -866,8 +915,9 @@ class VinApp:
             self.credentials = signed_in
         await self.load_initial_model()
 
-    def model_indicator_text(self):
+    def model_indicator_text(self) -> str:
         if self.selected_model:
+            assert self.selected_provider is not None
             return (
                 f" {PROVIDER_LABELS[self.selected_provider]} · "
                 + model_display_name(self.models, self.selected_model)
@@ -878,7 +928,7 @@ class VinApp:
             else " Not signed in · /login"
         )
 
-    def run(self):
+    def run(self) -> None:
         self.header = Markdown(
             "**Vin**\n\n" "Type a message · `/help` for commands · `/exit` to quit"
         )

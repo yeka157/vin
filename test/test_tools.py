@@ -1,7 +1,6 @@
 """Core behavior checks for workspace file tools and Bash."""
 
-import importlib
-import json
+from collections.abc import Callable
 import os
 from pathlib import Path
 import shlex
@@ -10,36 +9,29 @@ import sys
 import tempfile
 import time
 from threading import Event, Thread
+from typing import ParamSpec, TypeVar
 import unittest
 from unittest.mock import patch
 
+from vin import tools
+from vin.types import Pathish
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
 
 class ToolTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         previous = Path.cwd()
         os.chdir(self.root)
         self.addCleanup(os.chdir, previous)
-        # A fresh import models a separate launch without leaking state to tests.
-        previous_module = sys.modules.pop('vin.tools', None)
-        package = importlib.import_module('vin')
-        previous_attribute = getattr(package, 'tools', None)
-        def restore_module():
-            sys.modules.pop('vin.tools', None)
-            if previous_module is not None:
-                sys.modules['vin.tools'] = previous_module
-            if previous_attribute is not None:
-                package.tools = previous_attribute
-            elif hasattr(package, 'tools'):
-                del package.tools
-        self.addCleanup(restore_module)
-        self.assertIsNotNone(importlib.util.find_spec('vin.tools'),
-                             'Implement the four public functions in src/vin/tools.py first.')
-        self.tools = importlib.import_module('vin.tools')
+        self.tools = tools
+        self.enterContext(patch.object(tools, "LAUNCH_DIR", self.root))
 
-    def rejected(self, function, *args, **kwargs):
+    def rejected(self, function: Callable[_P, _R], *args: _P.args, **kwargs: _P.kwargs) -> None:
         try:
             result = function(*args, **kwargs)
         except (ValueError, OSError, RuntimeError, UnicodeError):
@@ -47,14 +39,14 @@ class ToolTests(unittest.TestCase):
         self.assertRegex(str(result).lower(), r'error|reject|ambiguous|not found|no change|limit|exceed',
                          'Invalid operations must raise or return an explicit error.')
 
-    def output(self, result):
-        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+    def output(self, result: str) -> str:
+        return result
 
-    def assert_exit(self, result, code):
+    def assert_exit(self, result: str, code: int) -> None:
         self.assertRegex(self.output(result).lower(), rf'exit[_ ]code[\s"\x27:=]+{code}(?!\d)')
 
 
-    def test_read_line_numbers_offset_limit_and_default_200(self):
+    def test_read_line_numbers_offset_limit_and_default_200(self) -> None:
         (self.root/'f').write_text(''.join(f'line {n}\n' for n in range(1, 205)))
         result = self.output(self.tools.read('f', offset=2, limit=2))
         self.assertRegex(result, r'(?m)^\s*2\s*[:|\t ]\s*line 2$')
@@ -68,14 +60,14 @@ class ToolTests(unittest.TestCase):
         (self.root/'f').write_text('x\n'*2001)
         self.assertEqual(len(self.output(self.tools.read('f', limit=2000)).splitlines()), 2000)
 
-    def test_write_creates_parents_and_overwrites_utf8(self):
+    def test_write_creates_parents_and_overwrites_utf8(self) -> None:
         self.tools.write('nested/f', 'café\n')
         file = self.root/'nested/f'
         self.assertEqual(file.read_bytes(), 'café\n'.encode())
         self.tools.write('nested/f', 'new')
         self.assertEqual(file.read_bytes(), b'new')
 
-    def test_edit_returns_diff_and_exact_match_preserves_other_bytes(self):
+    def test_edit_returns_diff_and_exact_match_preserves_other_bytes(self) -> None:
         file = self.root/'f'
         file.write_bytes('keep “this”  \n  old  \nend\u00a0 \n'.encode())
         result = self.output(self.tools.edit('f', 'old', 'new'))
@@ -84,7 +76,7 @@ class ToolTests(unittest.TestCase):
         self.assertIn('@@', result)
         self.assertEqual(file.read_bytes(), 'keep “this”  \n  new  \nend\u00a0 \n'.encode())
 
-    def test_fuzzy_preserves_bom_crlf_unrelated_lines_and_permissions(self):
+    def test_fuzzy_preserves_bom_crlf_unrelated_lines_and_permissions(self) -> None:
         file = self.root/'f'
         file.write_bytes('\ufeffkeep “this”  \r\n  x = “café” – ２  \r\nuntouched\u00a0 \r\n'.encode())
         file.chmod(0o751)
@@ -97,7 +89,7 @@ class ToolTests(unittest.TestCase):
         self.tools.write('f', 'new')
         self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o751)
 
-    def test_fuzzy_matching_normalizes_punctuation_spaces_and_compatibility(self):
+    def test_fuzzy_matching_normalizes_punctuation_spaces_and_compatibility(self) -> None:
         for source, search in [('“hello”', '"hello"'), ('‘hello’', "'hello'"),
                                ('a—b', 'a-b'), ('a\u00a0b', 'a b'), ('a\u2009b', 'a b'),
                                ('ﬃ', 'ffi'), ('Ａ', 'A'), ('cafe\u0301', 'café'),
@@ -107,7 +99,7 @@ class ToolTests(unittest.TestCase):
                 self.tools.edit('f', search, 'changed')
                 self.assertEqual((self.root/'f').read_text(), 'changed')
 
-    def test_fuzzy_multiline_keeps_indentation_and_duplicate_unrelated_lines(self):
+    def test_fuzzy_multiline_keeps_indentation_and_duplicate_unrelated_lines(self) -> None:
         file = self.root/'f'
         file.write_bytes('same “line”  \n  a = “old”  \n    b = １\nsame "line"\n'.encode())
         self.tools.edit('f', '  a = "old"\n    b = 1', '  a = "new"\n    b = 2')
@@ -116,7 +108,7 @@ class ToolTests(unittest.TestCase):
         self.rejected(self.tools.edit, 'f', '  a = “new”\n  b = 2', 'bad')
         self.assertEqual(file.read_bytes(), original)
 
-    def test_edit_rejections_leave_file_unchanged(self):
+    def test_edit_rejections_leave_file_unchanged(self) -> None:
         cases = [('abc', '', 'x'), ('abc', ' \n\t', 'x'), ('abc', 'missing', 'x'),
                  ('abc', 'abc', 'abc'), ('x x', 'x', 'y'),
                  ('café cafe\u0301', 'café', 'y'), ('“x” "x"', '"x"', 'y'),
@@ -128,7 +120,7 @@ class ToolTests(unittest.TestCase):
                 self.rejected(self.tools.edit, 'f', old, new)
                 self.assertEqual(file.read_bytes(), content.encode())
 
-    def test_paths_and_symlinks_cannot_escape_launch_directory(self):
+    def test_paths_and_symlinks_cannot_escape_launch_directory(self) -> None:
         with tempfile.TemporaryDirectory() as outside:
             external = Path(outside)/'f'
             external.write_text('private')
@@ -136,14 +128,15 @@ class ToolTests(unittest.TestCase):
             (self.root/'file-link').symlink_to(external)
             relative_escape = os.path.relpath(external, self.root)
             for path in [str(external), relative_escape, 'link/f', 'link/new', 'file-link']:
-                for method, args in [(self.tools.read, ()), (self.tools.write, ('x',)),
-                                     (self.tools.edit, ('private', 'x'))]:
-                    with self.subTest(path=path, method=method.__name__):
-                        self.rejected(method, path, *args)
+                for name, operation in [("read", lambda: self.tools.read(path)),
+                                        ("write", lambda: self.tools.write(path, 'x')),
+                                        ("edit", lambda: self.tools.edit(path, 'private', 'x'))]:
+                    with self.subTest(path=path, method=name):
+                        self.rejected(operation)
             self.assertEqual(external.read_text(), 'private')
             self.assertFalse((Path(outside)/'new').exists())
 
-    def test_relative_paths_keep_original_launch_directory_after_chdir(self):
+    def test_relative_paths_keep_original_launch_directory_after_chdir(self) -> None:
         (self.root/'f').write_text('launch')
         (self.root/'sub').mkdir()
         os.chdir(self.root/'sub')
@@ -153,7 +146,7 @@ class ToolTests(unittest.TestCase):
         self.assertFalse((self.root/'sub/new').exists())
         self.assertIn(str(self.root), self.output(self.tools.bash('pwd')))
 
-    def test_two_mb_byte_limits_and_edit_growth(self):
+    def test_two_mb_byte_limits_and_edit_growth(self) -> None:
         file = self.root/'f'
         file.write_bytes(b'x'*2_000_001)
         self.rejected(self.tools.read, 'f')
@@ -166,7 +159,7 @@ class ToolTests(unittest.TestCase):
         self.tools.write('boundary', 'é'*1_000_000)
         self.assertEqual((self.root/'boundary').stat().st_size, 2_000_000)
 
-    def test_tool_output_caps_have_visible_marker(self):
+    def test_tool_output_caps_have_visible_marker(self) -> None:
         (self.root/'f').write_text('x'*30_000)
         python = shlex.quote(sys.executable)
         for result in [self.tools.read('f'), self.tools.bash(f'{python} -c \'print("x"*40000)\'')]:
@@ -179,7 +172,7 @@ class ToolTests(unittest.TestCase):
         self.assertIn('truncat', diff.lower())
         self.assertEqual((self.root/'f').read_text(), 'x'*30_000)
 
-    def test_bash_combines_stderr_and_stdout_exit_status_and_launch_cwd(self):
+    def test_bash_combines_stderr_and_stdout_exit_status_and_launch_cwd(self) -> None:
         result = self.tools.bash('printf out; printf err >&2; exit 7')
         self.assertIn('outerr', self.output(result))
         self.assert_exit(result, 7)
@@ -188,7 +181,7 @@ class ToolTests(unittest.TestCase):
         for timeout in [0, -1, 301]:
             self.rejected(self.tools.bash, 'true', timeout=timeout)
 
-    def test_bash_timeout_terminates_descendants(self):
+    def test_bash_timeout_terminates_descendants(self) -> None:
         marker = self.root/'late'
         start = time.monotonic()
         # An un-killed child would create late after its shell has been terminated.
@@ -199,13 +192,13 @@ class ToolTests(unittest.TestCase):
         self.assertFalse(marker.exists(), 'Timeout must kill the entire process group.')
         self.assertRegex(self.output(result).lower(), r'exit[_ ]code')
 
-    def test_bash_is_not_limited_by_file_tool_path_checks(self):
+    def test_bash_is_not_limited_by_file_tool_path_checks(self) -> None:
         with tempfile.TemporaryDirectory() as outside:
             file = Path(outside)/'f'
             file.write_text('outside-data')
             self.assertIn('outside-data', self.output(self.tools.bash(f'cat {shlex.quote(str(file))}')))
 
-    def test_atomic_replace_failure_keeps_original_and_cleans_temporary_file(self):
+    def test_atomic_replace_failure_keeps_original_and_cleans_temporary_file(self) -> None:
         file = self.root/'f'
         file.write_text('old')
         with patch('os.replace', side_effect=OSError('simulated rename failure')):
@@ -213,7 +206,7 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(file.read_text(), 'old')
         self.assertEqual({p.name for p in self.root.iterdir()}, {'f'})
 
-    def test_aisuite_validates_arguments_and_keeps_python_defaults(self):
+    def test_aisuite_validates_arguments_and_keeps_python_defaults(self) -> None:
         from aisuite.utils.tools import Tools
         registry = Tools([self.tools.read, self.tools.write, self.tools.edit, self.tools.bash])
         (self.root/'f').write_text('one\ntwo')
@@ -223,19 +216,19 @@ class ToolTests(unittest.TestCase):
         with self.assertRaises((ValueError, TypeError)):
             registry.execute({'function': {'name': 'read', 'arguments': '{"path":[]}'}})
 
-    def test_concurrent_edits_are_serialized_without_lost_updates(self):
+    def test_concurrent_edits_are_serialized_without_lost_updates(self) -> None:
         file = self.root/'f'
         file.write_text('left right')
         committing, release, second_done = Event(), Event(), Event()
-        results = []
+        results: list[str | Exception] = []
         actual_replace = os.replace
-        def delayed_replace(*args, **kwargs):
+        def delayed_replace(src: Pathish, dst: Pathish, *, src_dir_fd: int | None = None, dst_dir_fd: int | None = None) -> None:
             if not committing.is_set():
                 committing.set()
                 if not release.wait(3):
                     raise RuntimeError('Test timed out waiting for release.')
-            return actual_replace(*args, **kwargs)
-        def edit(old, new, done=None):
+            return actual_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+        def edit(old: str, new: str, done: Event | None = None) -> None:
             try:
                 results.append(self.tools.edit('f', old, new))
             except Exception as error:
@@ -262,13 +255,13 @@ class ToolTests(unittest.TestCase):
         self.assertFalse(any(isinstance(result, Exception) for result in results), results)
         self.assertEqual(file.read_text(), 'LEFT RIGHT')
 
-    def test_external_change_before_save_is_rejected(self):
+    def test_external_change_before_save_is_rejected(self) -> None:
         file = self.root/'f'
         file.write_text('old')
         original = tempfile.mkstemp
-        def changed(*args, **kwargs):
+        def changed(suffix: str | None = None, prefix: str | None = None, dir: Pathish | None = None, text: bool = False) -> tuple[int, str]:
             file.write_text('external')
-            return original(*args, **kwargs)
+            return original(suffix=suffix, prefix=prefix, dir=dir, text=text)
         # Injection point: standard-library temporary-file creation. If the
         # implementation uses a different atomic-write helper, adapt this hook.
         with patch('tempfile.mkstemp', side_effect=changed) as create:

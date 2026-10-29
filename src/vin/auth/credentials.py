@@ -1,3 +1,7 @@
+from collections.abc import Mapping
+from typing import cast
+from vin.types import AccountRecord, Registration, Credentials, Identity, Pathish, is_record, is_string_list, json_value
+
 import json
 import os
 from datetime import datetime, timezone, timedelta
@@ -12,7 +16,7 @@ ACTIVE_SESSION_PATH = HOST_ID_PATH.parent / "active_session.json"
 OPENAI_ISSUER = "https://auth.openai.com"
 
 
-def get_host_id():
+def get_host_id() -> str:
     try:
         host_id = HOST_ID_PATH.read_text(encoding="utf-8").strip()
         parsed_id = UUID(host_id)
@@ -26,7 +30,7 @@ def get_host_id():
         return host_id
 
 
-def build_credential_record(tokens, identity, client_id, host_id, scopes, received_at):
+def build_credential_record(tokens: Mapping[str, object], identity: Identity, client_id: str, host_id: str, scopes: set[str], received_at: datetime) -> Credentials:
     access_token = tokens.get("access_token")
     if not isinstance(access_token, str) or not access_token:
         raise RuntimeError("Token response did not contain an access token")
@@ -50,7 +54,7 @@ def build_credential_record(tokens, identity, client_id, host_id, scopes, receiv
         "email": identity.get("email"),
         "client_id": client_id,
         "ext_agent_host_id": host_id,
-        "id_token": tokens["id_token"],
+        "id_token": json_value(tokens["id_token"]),
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "Bearer",
@@ -60,7 +64,7 @@ def build_credential_record(tokens, identity, client_id, host_id, scopes, receiv
     }
 
 
-def save_private_json(destination, data):
+def save_private_json(destination: Pathish, data: object) -> Path:
     destination = Path(destination)
     temporary_path = None
     try:
@@ -83,7 +87,7 @@ def save_private_json(destination, data):
     return destination
 
 
-def save_credential_record(credentials):
+def save_credential_record(credentials: AccountRecord) -> Path:
     account_key = json.dumps(
         [
             credentials["issuer"],
@@ -95,7 +99,7 @@ def save_credential_record(credentials):
     return save_private_json(CREDENTIALS_DIR / filename, credentials)
 
 
-def is_access_token_expired(credentials):
+def is_access_token_expired(credentials: Mapping[str, object]) -> bool:
     saved_at = credentials.get("saved_at")
     expires_in = credentials.get("expires_in")
     if not isinstance(saved_at, str) or type(expires_in) is not int or expires_in <= 0:
@@ -112,19 +116,19 @@ def is_access_token_expired(credentials):
     return datetime.now(timezone.utc) >= expires_at
 
 
-def load_credential_record(path):
+def load_credential_record(path: Pathish) -> AccountRecord | None:
     try:
         with Path(path).open("r", encoding="utf-8") as saved:
             info = os.fstat(saved.fileno())
             if info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise RuntimeError("Saved credentials must be private to your OS user")
-            credentials = json.load(saved)
+            credentials = cast(object, json.load(saved))
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
         raise RuntimeError("Could not read saved sign-in credentials") from None
 
-    if not isinstance(credentials, dict):
+    if not is_record(credentials):
         raise RuntimeError("Expected a saved credential object")
 
     for field in ("issuer", "subject", "client_id", "ext_agent_host_id"):
@@ -141,45 +145,45 @@ def load_credential_record(path):
         field not in credentials
         for field in ("access_token", "refresh_token", "id_token")
     ):
-        return credentials
+        return cast(Registration, credentials)
 
     if not isinstance(credentials.get("id_token"), str) or not credentials["id_token"]:
         raise RuntimeError("Saved credentials contained an invalid id_token")
 
     scopes = credentials.get("scopes")
-    if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
+    if not is_string_list(scopes):
         raise RuntimeError("Saved credentials contained invalid scopes")
 
     is_access_token_expired(credentials)
-    identity = {
-        "iss": credentials["issuer"],
-        "sub": credentials["subject"],
-        "email": credentials.get("email"),
+    identity: Identity = {
+        "iss": cast(str, credentials["issuer"]),
+        "sub": cast(str, credentials["subject"]),
+        "email": json_value(credentials.get("email")),
     }
 
     return build_credential_record(
         credentials,
         identity,
-        credentials["client_id"],
-        credentials["ext_agent_host_id"],
+        cast(str, credentials["client_id"]),
+        cast(str, credentials["ext_agent_host_id"]),
         set(scopes),
-        datetime.fromisoformat(credentials["saved_at"]),
+        datetime.fromisoformat(cast(str, credentials["saved_at"])),
     )
 
 
-def load_active_session():
+def load_active_session() -> AccountRecord | None:
     try:
         with ACTIVE_SESSION_PATH.open("r", encoding="utf-8") as saved:
             info = os.fstat(saved.fileno())
             if info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise RuntimeError("Saved session must be private to your OS user")
-            session = json.load(saved)
+            session = cast(object, json.load(saved))
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
         raise RuntimeError("Could not read the saved session") from None
 
-    if not isinstance(session, dict):
+    if not is_record(session):
         raise RuntimeError("Expected a saved session object")
 
     filename = session.get("account_file")
@@ -194,7 +198,7 @@ def load_active_session():
     return load_credential_record(CREDENTIALS_DIR / filename)
 
 
-def list_saved_accounts():
+def list_saved_accounts() -> list[AccountRecord]:
     try:
         paths = sorted(CREDENTIALS_DIR.iterdir())
     except FileNotFoundError:
@@ -202,7 +206,7 @@ def list_saved_accounts():
     except OSError:
         raise RuntimeError("Could not list saved accounts") from None
 
-    accounts = []
+    accounts: list[AccountRecord] = []
     for path in paths:
         if path.suffix != ".json":
             continue

@@ -3,7 +3,9 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 from threading import Event, get_ident
-from types import SimpleNamespace
+from collections.abc import Callable
+from typing import Literal, cast
+from prompt_toolkit import PromptSession
 import unittest
 from unittest.mock import Mock, patch
 
@@ -12,10 +14,15 @@ from prompt_toolkit.document import Document
 
 from vin.auth import chatgpt as auth
 from vin.tui import app as tui
+from vin.types import Credentials, History, JSONValue, ModelMetadata
+from vin.provider.events import ReplyEvents
+
+type ReplyTask = asyncio.Task[Literal["error", "rate_limit"] | None]
+type PendingTask = asyncio.Task[list[ModelMetadata] | Literal["error", "rate_limit"] | None]
 
 
 class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.owner = tui.VinApp()
         self.owner.credentials = {
             "issuer": "https://auth.openai.com", "subject": "fake-user",
@@ -30,31 +37,31 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.owner.selected_model = "selected-model"
         self.owner.app = Mock()
         self.draft = Document("next draft", cursor_position=3)
-        self.owner.session = SimpleNamespace(app=self.owner.app, default_buffer=Buffer(document=self.draft))
-        self.tokens = {"access_token": "new-secret", "refresh_token": "new-refresh-secret",
+        self.owner.session = cast(PromptSession[str], Mock(spec=PromptSession, app=self.owner.app, default_buffer=Buffer(document=self.draft)))
+        self.tokens: dict[str, JSONValue] = {"access_token": "new-secret", "refresh_token": "new-refresh-secret",
                        "token_type": "Bearer", "expires_in": 3600}
         self.exchange = self.enterContext(patch.object(auth, "exchange_refresh_token", return_value=self.tokens))
         self.save = self.enterContext(patch.object(auth, "save_credential_record"))
-        self.seen = []
-        def worker(credentials, model, messages, events, cancel_event):
+        self.seen: list[Credentials | None] = []
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
             self.seen.append(credentials)
             events.put(("text", "Done"))
             events.put(("complete", None))
         self.worker = self.enterContext(patch.object(tui, "stream_chatgpt_response", side_effect=worker))
 
-    def start(self, text="Inspect"):
+    def start(self, text: str = "Inspect") -> ReplyTask:
         task = asyncio.create_task(self.owner.stream_reply(text))
         self.owner.pending_reply = task
         return task
 
-    async def wait_until(self, predicate):
+    async def wait_until(self, predicate: Callable[[], bool]) -> None:
         async with asyncio.timeout(2):
             while not predicate():
                 await asyncio.sleep(.001)
 
-    async def test_expired_credentials_refresh_off_ui_thread_before_chat_and_are_saved(self):
+    async def test_expired_credentials_refresh_off_ui_thread_before_chat_and_are_saved(self) -> None:
         ui_thread = get_ident()
-        def exchange(credentials):
+        def exchange(credentials: Credentials) -> dict[str, JSONValue]:
             self.assertNotEqual(get_ident(), ui_thread)
             self.assertIs(credentials, self.original)
             return self.tokens
@@ -62,12 +69,12 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.start(), 2)
         self.exchange.assert_called_once()
         self.save.assert_called_once_with(self.owner.credentials)
-        self.assertEqual(self.owner.credentials["access_token"], "new-secret")
-        self.assertEqual(self.seen[0]["access_token"], "new-secret")
+        self.assertEqual(self.owner.credentials.get("access_token") if self.owner.credentials else None, "new-secret")
+        self.assertEqual(self.seen[0].get("access_token") if self.seen[0] else None, "new-secret")
         self.assertEqual(self.owner.session.default_buffer.document, self.draft)
 
 
-    async def test_transient_refresh_failure_blocks_chat_without_secrets_or_login_advice(self):
+    async def test_transient_refresh_failure_blocks_chat_without_secrets_or_login_advice(self) -> None:
         self.exchange.side_effect = RuntimeError("old-secret new-refresh-secret")
         await asyncio.wait_for(self.start(), 2)
         self.worker.assert_not_called()
@@ -82,7 +89,7 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.owner.credentials, self.original)
         self.assertEqual(self.owner.session.default_buffer.document, self.draft)
 
-    async def test_terminal_refresh_failure_advises_login_and_preserves_credentials(self):
+    async def test_terminal_refresh_failure_advises_login_and_preserves_credentials(self) -> None:
         self.exchange.side_effect = auth.TokenExchangeError(400, "invalid_grant")
         await asyncio.wait_for(self.start(), 2)
         self.worker.assert_not_called()
@@ -92,14 +99,14 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/login", str(self.owner.transcript[0]["content"]))
         self.assertRegex(str(self.owner.transcript[1]["content"]), r"^Failed after \d+s$")
 
-    async def test_model_discovery_and_chat_share_the_same_refresh(self):
+    async def test_model_discovery_and_chat_share_the_same_refresh(self) -> None:
         entered, release = Event(), Event()
-        def exchange(credentials):
+        def exchange(credentials: Credentials) -> dict[str, JSONValue]:
             entered.set()
             release.wait(2)
             return self.tokens
         self.exchange.side_effect = exchange
-        tasks = []
+        tasks: list[PendingTask] = []
         with (
             patch.object(tui, "list_chatgpt_models", return_value=[]) as catalog,
             patch.object(tui, "save_cached_chatgpt_models") as cache,
@@ -119,7 +126,7 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
                 self.exchange.assert_called_once()
                 catalog.assert_called_once_with(self.owner.credentials)
                 cache.assert_called_once_with(self.owner.credentials, [])
-                self.assertEqual(self.seen[0]["access_token"], "new-secret")
+                self.assertEqual(self.seen[0].get("access_token") if self.seen[0] else None, "new-secret")
             finally:
                 release.set()
                 for task in tasks:
@@ -127,14 +134,14 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def test_cancel_then_next_prompt_share_inflight_refresh(self):
+    async def test_cancel_then_next_prompt_share_inflight_refresh(self) -> None:
         entered, release = Event(), Event()
-        def exchange(credentials):
+        def exchange(credentials: Credentials) -> dict[str, JSONValue]:
             entered.set()
             release.wait(2)
             return self.tokens
         self.exchange.side_effect = exchange
-        tasks = []
+        tasks: list[PendingTask] = []
         try:
             first = self.start("Cancelled")
             tasks.append(first)
@@ -150,7 +157,7 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
             self.worker.assert_not_called()
             release.set()
             await asyncio.wait_for(second, 2)
-            self.assertEqual(self.seen[0]["access_token"], "new-secret")
+            self.assertEqual(self.seen[0].get("access_token") if self.seen[0] else None, "new-secret")
             self.assertEqual([m["content"] for m in self.owner.messages], ["Next", "Done"])
             self.assertEqual(self.owner.session.default_buffer.document, self.draft)
         finally:
@@ -160,19 +167,22 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def test_logout_waits_for_cancelled_turns_refresh_and_revokes_replacement(self):
+    async def test_logout_waits_for_cancelled_turns_refresh_and_revokes_replacement(self) -> None:
         entered, release = Event(), Event()
-        def exchange(credentials):
+        def exchange(credentials: Credentials) -> dict[str, JSONValue]:
             entered.set()
             release.wait(2)
             return self.tokens
         self.exchange.side_effect = exchange
-        revoked = []
-        def logout(credentials, **kwargs):
-            revoked.append(credentials["refresh_token"])
-            return {key: value for key, value in credentials.items()
-                    if key not in ("access_token", "refresh_token", "id_token")}
-        tasks = []
+        revoked: list[str | None] = []
+        def logout(credentials: Credentials, **kwargs: object) -> Credentials:
+            revoked.append(credentials.get("refresh_token"))
+            result = credentials.copy()
+            result.pop("access_token", None)
+            result.pop("refresh_token", None)
+            result.pop("id_token", None)
+            return result
+        tasks: list[PendingTask] = []
         with patch.object(tui, "logout_chatgpt", side_effect=logout) as sign_out:
             try:
                 turn = self.start()
@@ -188,6 +198,7 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 await asyncio.wait_for(leaving, 2)
                 self.assertEqual(revoked, ["new-refresh-secret"])
+                assert self.owner.credentials is not None
                 self.assertNotIn("access_token", self.owner.credentials)
                 self.worker.assert_not_called()
             finally:
@@ -197,9 +208,9 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def test_late_refresh_does_not_replace_a_different_active_session(self):
+    async def test_late_refresh_does_not_replace_a_different_active_session(self) -> None:
         entered, release = Event(), Event()
-        def exchange(credentials):
+        def exchange(credentials: Credentials) -> dict[str, JSONValue]:
             entered.set()
             release.wait(2)
             return self.tokens
@@ -207,7 +218,7 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
         task = self.start()
         try:
             await self.wait_until(entered.is_set)
-            replacement = {**self.original, "subject": "different-user", "access_token": "different-secret"}
+            replacement: Credentials = {**self.original, "subject": "different-user", "access_token": "different-secret"}
             self.owner.credentials = replacement
             release.set()
             await asyncio.wait_for(task, 2)

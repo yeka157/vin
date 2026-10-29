@@ -1,5 +1,6 @@
 import re
 
+from rich.console import Console
 from rich.padding import Padding
 from rich.table import Table
 from rich.text import Text
@@ -32,7 +33,7 @@ def parse_diff_rows(
     ):
         return None
 
-    rows = []
+    rows: list[tuple[int | None, str, str]] = []
     old_line = new_line = 0
     old_remaining = new_remaining = 0
     in_hunk = False
@@ -91,7 +92,7 @@ def parse_diff_rows(
     return rows
 
 
-def print_diff(console, diff):
+def print_diff(console: Console, diff: str) -> None:
     rows = parse_diff_rows(diff)
 
     if rows is None:
@@ -129,8 +130,8 @@ def print_diff(console, diff):
 
         table.add_row(
             Text(f"{label} │ ", style="dim"),
-            Text(prefix + " ", style=foreground),
-            Text(content, style=foreground),
+            Text(prefix + " ", style=foreground or ""),
+            Text(content, style=foreground or ""),
             style=f" on {background}" if background else None,
         )
 

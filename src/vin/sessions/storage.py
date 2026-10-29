@@ -1,3 +1,7 @@
+from collections.abc import Generator
+from typing import cast
+from vin.types import Pathish, SessionRecord
+
 from contextlib import contextmanager
 from datetime import datetime
 import fcntl
@@ -14,12 +18,12 @@ from vin.sessions.records import validate_session
 SESSIONS_DIR = Path.home() / ".local" / "share" / "vin" / "sessions"
 
 
-def project_key(project_dir):
+def project_key(project_dir: Pathish) -> str:
     project_path = Path(project_dir).resolve()
     return sha256(str(project_path).encode("utf-8")).hexdigest()
 
 
-def session_path(project_dir, session_id):
+def session_path(project_dir: Pathish, session_id: object) -> Path:
     if not isinstance(session_id, str):
         raise ValueError("")
     parsed_id = UUID(session_id)
@@ -30,7 +34,7 @@ def session_path(project_dir, session_id):
 
 
 @contextmanager
-def session_lock(project_dir, session_id):
+def session_lock(project_dir: Pathish, session_id: object) -> Generator[None]:
     lock_path = session_path(project_dir, session_id).with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -47,7 +51,7 @@ class SessionConflictError(RuntimeError):
     pass
 
 
-def save_session(project_dir, record, *, expected_record=None):
+def save_session(project_dir: Pathish, record: SessionRecord, *, expected_record: SessionRecord | None = None) -> Path:
     validate_session(record, project_dir)
     if expected_record is not None:
         validate_session(expected_record, project_dir)
@@ -70,7 +74,7 @@ def save_session(project_dir, record, *, expected_record=None):
         raise RuntimeError("Could not save session.") from None
 
 
-def load_session(project_dir, session_id):
+def load_session(project_dir: Pathish, session_id: object) -> SessionRecord | None:
     destination = session_path(project_dir, session_id)
 
     try:
@@ -79,9 +83,10 @@ def load_session(project_dir, session_id):
             if info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise RuntimeError("Saved sessions must be private to your OS user.")
 
-            record = json.load(saved)
+            raw_record = cast(object, json.load(saved))
 
-        validate_session(record, project_dir)
+        validate_session(raw_record, project_dir)
+        record = cast(SessionRecord, raw_record)
         if record["id"] != session_id:
             raise ValueError("Session ID does not match its filename.")
 
@@ -92,7 +97,7 @@ def load_session(project_dir, session_id):
         raise RuntimeError("Could not read saved session.") from None
 
 
-def list_sessions(project_dir):
+def list_sessions(project_dir: Pathish) -> list[SessionRecord]:
     directory = SESSIONS_DIR / project_key(project_dir)
 
     try:
@@ -102,7 +107,7 @@ def list_sessions(project_dir):
     except OSError:
         raise RuntimeError("Could not list saved sessions.") from None
 
-    records = []
+    records: list[SessionRecord] = []
     for path in paths:
         if path.suffix != ".json":
             continue

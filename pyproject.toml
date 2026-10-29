@@ -19,3 +19,17 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["vin", "vin.*"]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.40.2",
+]
+
+[tool.basedpyright]
+include = ["src", "test", "typings"]
+pythonVersion = "3.14"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "strict"
+reportAny = "error"
+reportExplicitAny = "error"

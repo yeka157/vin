@@ -3,24 +3,32 @@
 from copy import deepcopy
 import asyncio
 from contextlib import nullcontext
+from collections.abc import Callable, Coroutine, Sequence
+from typing import Literal, cast
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from tempfile import TemporaryDirectory
 from threading import Event
-from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.input import DummyInput
+from prompt_toolkit.output import DummyOutput
+from rich.markdown import Markdown
 from rich.text import Text
 
 from vin.sessions import storage
 from vin.sessions.records import new_session, snapshot_session
 from vin.tui import app, conversations
+from vin.types import Credentials, History, SessionRecord
+from vin.provider.events import ReplyEvent, ReplyEvents
+from session_typing_helpers import list_value, present, record_value, string_value, text_value
 
 
 class SessionCheckpointTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -33,13 +41,10 @@ class SessionCheckpointTests(unittest.TestCase):
         self.owner = app.VinApp()
         self.owner.project_dir = self.project
 
-    def checkpoint(self, **kwargs):
-        helper = getattr(self.owner, "checkpoint_session", None)
-        self.assertTrue(callable(helper), "Add VinApp.checkpoint_session(self) in tui/app.py.")
-        return helper(**kwargs)
+    def checkpoint(self, *, force: bool = False) -> bool:
+        return self.owner.checkpoint_session(force=force)
 
-
-    def test_checkpoint_saves_current_state_and_keeps_independent_baseline_for_updates(self):
+    def test_checkpoint_saves_current_state_and_keeps_independent_baseline_for_updates(self) -> None:
         self.owner.session_record = new_session(self.project, "Review the queue")
         self.owner.messages = [{"metadata": {"nested": ["original"]}}]
         self.owner.transcript = [
@@ -54,8 +59,8 @@ class SessionCheckpointTests(unittest.TestCase):
         with patch.object(conversations, "monotonic", return_value=10.0):
             self.assertTrue(self.checkpoint())
 
-        session_id = self.owner.session_record["id"]
-        saved = storage.load_session(self.project, session_id)
+        session_id = present(self.owner.session_record)["id"]
+        saved = present(storage.load_session(self.project, session_id))
         baseline = deepcopy(saved)
         self.assertEqual(saved["messages"], original_messages)
         self.assertEqual(saved["active_turn"], self.owner.active_turn)
@@ -64,32 +69,33 @@ class SessionCheckpointTests(unittest.TestCase):
         self.assertEqual(self.owner.transcript, original_transcript)
         self.assertEqual(self.owner.last_session_checkpoint, 10.0)
 
-        self.owner.messages[0]["metadata"]["nested"].append("later")
+        list_value(record_value(self.owner.messages[0]["metadata"])["nested"]).append("later")
+        assert self.owner.transcript[-1]["role"] == "assistant"
         self.owner.transcript[-1]["content"] += " more"
-        self.owner.session_record["name"] = "Renamed in memory"
-        self.owner.active_turn["tools_used"] = True
+        present(self.owner.session_record)["name"] = "Renamed in memory"
+        present(self.owner.active_turn)["tools_used"] = True
         self.assertEqual(self.owner.saved_session_record, baseline)
         self.assertEqual(storage.load_session(self.project, session_id), baseline)
 
         with patch.object(conversations, "monotonic", return_value=11.0):
             self.assertTrue(self.checkpoint())
 
-        saved = storage.load_session(self.project, session_id)
+        saved = present(storage.load_session(self.project, session_id))
         self.assertEqual(saved["id"], session_id)
         self.assertEqual(saved["name"], "Renamed in memory")
         self.assertEqual(saved["messages"], self.owner.messages)
         self.assertEqual(saved["transcript"][-1]["content"], "Checking more")
-        self.assertTrue(saved["active_turn"]["tools_used"])
+        self.assertTrue(present(saved["active_turn"])["tools_used"])
         self.assertEqual(self.owner.saved_session_record, saved)
         self.assertEqual(self.owner.last_session_checkpoint, 11.0)
 
-    def test_routine_checkpoints_coalesce_for_500ms_without_extending_the_deadline(self):
+    def test_routine_checkpoints_coalesce_for_500ms_without_extending_the_deadline(self) -> None:
         self.owner.session_record = new_session(self.project, "Review the queue")
         self.owner.transcript = [{"role": "assistant", "content": "First", "streaming": True}]
         self.owner.active_turn = {"prompt": "Review the queue", "tools_used": False}
         with patch.object(conversations, "monotonic", return_value=0.0):
             self.assertTrue(self.checkpoint())
-        path = storage.session_path(self.project, self.owner.session_record["id"])
+        path = storage.session_path(self.project, present(self.owner.session_record)["id"])
         previous = path.read_bytes()
         baseline = deepcopy(self.owner.saved_session_record)
         self.owner.transcript[0]["content"] = "Latest partial response"
@@ -106,11 +112,11 @@ class SessionCheckpointTests(unittest.TestCase):
 
         with patch.object(conversations, "monotonic", return_value=0.5):
             self.assertTrue(self.checkpoint())
-        saved = storage.load_session(self.project, self.owner.session_record["id"])
+        saved = present(storage.load_session(self.project, present(self.owner.session_record)["id"]))
         self.assertEqual(saved["transcript"][0]["content"], "Latest partial response")
         self.assertEqual(self.owner.last_session_checkpoint, 0.5)
 
-    def test_forced_checkpoint_flushes_final_state_inside_the_500ms_window(self):
+    def test_forced_checkpoint_flushes_final_state_inside_the_500ms_window(self) -> None:
         self.owner.session_record = new_session(self.project, "Review the queue")
         self.owner.transcript = [{"role": "assistant", "content": "Partial", "streaming": True}]
         self.owner.active_turn = {"prompt": "Review the queue", "tools_used": False}
@@ -123,23 +129,24 @@ class SessionCheckpointTests(unittest.TestCase):
         with patch.object(conversations, "monotonic", return_value=10.1):
             self.assertTrue(self.checkpoint(force=True))
 
-        saved = storage.load_session(self.project, self.owner.session_record["id"])
+        saved = present(storage.load_session(self.project, present(self.owner.session_record)["id"]))
         self.assertEqual(saved["transcript"][0]["content"], "Finished response")
+        assert "streaming" in saved["transcript"][0]
         self.assertFalse(saved["transcript"][0]["streaming"])
         self.assertEqual(saved["messages"], self.owner.messages)
         self.assertIsNone(saved["active_turn"])
         self.assertEqual(self.owner.last_session_checkpoint, 10.1)
 
-    def start_saved_conversation(self):
+    def start_saved_conversation(self) -> Path:
         self.owner.session_record = new_session(self.project, "Review the queue")
         self.owner.messages = [{"role": "user", "content": "Earlier request"}]
         self.owner.transcript = [{"role": "assistant", "content": "Earlier reply"}]
         self.owner.active_turn = {"prompt": "Review the queue", "tools_used": False}
         with patch.object(conversations, "monotonic", return_value=1.0):
             self.assertTrue(self.checkpoint(force=True))
-        return storage.session_path(self.project, self.owner.session_record["id"])
+        return storage.session_path(self.project, present(self.owner.session_record)["id"])
 
-    def test_failed_save_preserves_checkpoint_suppresses_duplicate_notices_and_can_retry(self):
+    def test_failed_save_preserves_checkpoint_suppresses_duplicate_notices_and_can_retry(self) -> None:
         path = self.start_saved_conversation()
         previous_bytes = path.read_bytes()
         previous_baseline = deepcopy(self.owner.saved_session_record)
@@ -160,21 +167,22 @@ class SessionCheckpointTests(unittest.TestCase):
         self.assertEqual(self.owner.transcript[0]["content"], "Unsaved progress")
         notices = [entry for entry in self.owner.transcript if entry["role"] == "notice"]
         self.assertEqual(len(notices), 1)
-        self.assertIn("not saved", notices[0]["content"].plain.lower())
-        self.assertIn("Disk unavailable", notices[0]["content"].plain)
-        self.assertEqual(self.owner.session_save_error, notices[0]["content"].plain)
+        self.assertIn("not saved", text_value(notices[0]["content"]).plain.lower())
+        self.assertIn("Disk unavailable", text_value(notices[0]["content"]).plain)
+        self.assertEqual(self.owner.session_save_error, text_value(notices[0]["content"]).plain)
 
         with patch.object(conversations, "monotonic", return_value=4.0):
             self.assertTrue(self.checkpoint(force=True))
-        saved = storage.load_session(self.project, self.owner.session_record["id"])
+        saved = present(storage.load_session(self.project, present(self.owner.session_record)["id"]))
         self.assertEqual(saved["transcript"][0]["content"], "Unsaved progress")
         self.assertEqual(self.owner.saved_session_record, saved)
         self.assertIsNone(self.owner.session_save_error)
 
-    def test_conflict_leaves_other_writer_file_and_live_conversation_intact(self):
+    def test_conflict_leaves_other_writer_file_and_live_conversation_intact(self) -> None:
         path = self.start_saved_conversation()
-        baseline = deepcopy(self.owner.saved_session_record)
-        external = dict(baseline, name="Saved elsewhere")
+        baseline = deepcopy(present(self.owner.saved_session_record))
+        external = deepcopy(baseline)
+        external["name"] = "Saved elsewhere"
         storage.save_session(self.project, external, expected_record=baseline)
         external_bytes = path.read_bytes()
         self.owner.transcript[0]["content"] = "Keep live progress"
@@ -187,58 +195,62 @@ class SessionCheckpointTests(unittest.TestCase):
         self.assertEqual(self.owner.saved_session_record, baseline)
         self.assertEqual(self.owner.transcript[0]["content"], "Keep live progress")
         self.assertEqual(list(self.owner.queued_prompts), ["Next request"])
-        self.assertIn("changed", self.owner.session_save_error.lower())
+        self.assertIn("changed", present(self.owner.session_save_error).lower())
 
 
 class SessionPromptCheckpointTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.project = Path(temporary.name) / "project"
         self.project.mkdir()
         self.destination = Path(temporary.name) / "session-data"
         self.enterContext(patch.object(storage, "SESSIONS_DIR", self.destination))
-        self.enterContext(patch.object(app, "patch_stdout", side_effect=lambda **kwargs: nullcontext()))
+        self.enterContext(patch.object(app, "patch_stdout", return_value=nullcontext()))
         self.owner = app.VinApp()
         self.owner.project_dir = self.project
-        self.owner.header = Text("Vin")
-        self.owner.session = SimpleNamespace(message="", default_buffer=Buffer())
+        self.owner.header = Markdown("Vin")
+        self.owner.session = PromptSession[str](input=DummyInput(), output=DummyOutput())
 
-    async def run_prompts(self, prompts, reply):
-        receiver = None
-        fake = SimpleNamespace(is_done=False, result=None, invalidate=lambda: None)
+    async def run_prompts(self, prompts: Sequence[str], reply: Callable[[str], Coroutine[object, object, None]]) -> str:
+        receiver: asyncio.Task[None] | None = None
+        result = ""
+        fake = Mock(spec=Application)
+        fake.is_done = False
 
-        def start(coroutine):
+        def start(coroutine: Coroutine[object, object, None]) -> asyncio.Task[None]:
             nonlocal receiver
             receiver = asyncio.create_task(coroutine)
             return receiver
 
-        def exit_app(*, result):
+        def exit_app(*, result: str) -> None:
             fake.is_done = True
-            fake.result = result
+            result_holder[0] = result
 
-        async def run_async(*, pre_run):
+        async def run_async(*, pre_run: Callable[[], None]) -> str:
             pre_run()
-            await asyncio.wait_for(receiver, timeout=2)
-            return fake.result
+            await asyncio.wait_for(present(receiver), timeout=2)
+            return result_holder[0]
 
-        fake.create_background_task = start
-        fake.exit = exit_app
-        fake.run_async = run_async
-        self.owner.app = fake
-        self.owner.session.app = fake
+        result_holder = [result]
+        fake.create_background_task = Mock(side_effect=start)
+        fake.exit = Mock(side_effect=exit_app)
+        fake.run_async = Mock(side_effect=run_async)
+        application = cast(Application[str], fake)
+        self.owner.app = application
+        self.owner.session.app = application
         for prompt in prompts:
             self.owner.submitted.put_nowait(prompt)
         with patch.object(self.owner, "stream_reply", side_effect=reply):
             return await self.owner.chat_loop()
 
-    async def test_prompt_is_saved_before_reply_and_clear_starts_another_identity(self):
-        observed = []
+    async def test_prompt_is_saved_before_reply_and_clear_starts_another_identity(self) -> None:
+        observed: list[SessionRecord] = []
 
-        async def reply(text):
+        async def reply(text: str) -> None:
             records = storage.list_sessions(self.project)
             self.assertTrue(records, "The prompt must be saved before the reply starts.")
-            record = storage.load_session(self.project, self.owner.session_record["id"])
+            record = present(storage.load_session(self.project, present(self.owner.session_record)["id"]))
             self.assertEqual(record["active_turn"], {"prompt": text, "tools_used": False})
             self.assertEqual(record["transcript"][-1], {"role": "user", "content": text})
             self.assertEqual(record["messages"], self.owner.messages)
@@ -265,8 +277,8 @@ class SessionPromptCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed[2]["messages"], [])
         self.assertEqual(len(storage.list_sessions(self.project)), 2)
 
-    async def test_commands_alone_do_not_create_a_saved_conversation(self):
-        async def unexpected_reply(text):
+    async def test_commands_alone_do_not_create_a_saved_conversation(self) -> None:
+        async def unexpected_reply(text: str) -> None:
             self.fail(f"A command started a reply: {text}")
 
         self.assertEqual(await self.run_prompts(["/clear", "/quit"], unexpected_reply), "/quit")
@@ -274,8 +286,8 @@ class SessionPromptCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.owner.session_record)
 
 
-    async def test_resume_arguments_reach_lookup_and_preserve_full_title_before_followup(self):
-        history = [{"role": "user", "content": "Previous request"},
+    async def test_resume_arguments_reach_lookup_and_preserve_full_title_before_followup(self) -> None:
+        history: History = [{"role": "user", "content": "Previous request"},
                    {"role": "assistant", "content": "Previous answer"}]
         record = snapshot_session(
             new_session(self.project, "Saved conversation with spaces"), history,
@@ -285,12 +297,12 @@ class SessionPromptCheckpointTests(unittest.IsolatedAsyncioTestCase):
         storage.save_session(self.project, record)
         self.owner.session.default_buffer.text = "Unsent draft"
         draft = self.owner.session.default_buffer.document
-        observed = []
+        observed: list[str] = []
 
-        async def reply(text):
+        async def reply(text: str) -> None:
             self.assertEqual(text, "Follow up", "Resume arguments must not become model prompts.")
             self.assertEqual(self.owner.messages, history)
-            self.assertEqual(self.owner.session_record["id"], record["id"])
+            self.assertEqual(present(self.owner.session_record)["id"], record["id"])
             observed.append(text)
             self.owner.pending_reply = None
 
@@ -308,8 +320,8 @@ class SessionPromptCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(storage.list_sessions(self.project)), 1)
 
 
-    async def test_rename_command_persists_title_and_can_resume_it_after_clear(self):
-        history = [{"role": "user", "content": "Previous request"},
+    async def test_rename_command_persists_title_and_can_resume_it_after_clear(self) -> None:
+        history: History = [{"role": "user", "content": "Previous request"},
                    {"role": "assistant", "content": "Previous answer"}]
         record = snapshot_session(
             new_session(self.project, "Original title"), history,
@@ -320,7 +332,7 @@ class SessionPromptCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.owner.session.default_buffer.text = "Unsent draft"
         draft = self.owner.session.default_buffer.document
 
-        async def unexpected_reply(text):
+        async def unexpected_reply(text: str) -> None:
             self.fail(f"A session command started a model reply: {text}")
 
         result = await self.run_prompts([
@@ -328,17 +340,17 @@ class SessionPromptCheckpointTests(unittest.IsolatedAsyncioTestCase):
         ], unexpected_reply)
 
         self.assertEqual(result, "/quit")
-        saved = storage.load_session(self.project, record["id"])
+        saved = present(storage.load_session(self.project, record["id"]))
         self.assertEqual(saved["name"], "New session title")
         self.assertEqual(saved["messages"], history)
         self.assertTrue(any(str(entry["content"]) == "Renamed: New session title"
                             for entry in self.owner.transcript))
 
-        async def followup(text):
+        async def followup(text: str) -> None:
             self.assertEqual(text, "Follow up")
             self.assertEqual(self.owner.messages, history)
-            self.assertEqual(self.owner.session_record["id"], record["id"])
-            self.assertEqual(self.owner.session_record["name"], "New session title")
+            self.assertEqual(present(self.owner.session_record)["id"], record["id"])
+            self.assertEqual(present(self.owner.session_record)["name"], "New session title")
             self.owner.pending_reply = None
 
         with patch.object(self.owner, "choose_inline", side_effect=AssertionError("An exact renamed title must not open a picker")):
@@ -351,7 +363,7 @@ class SessionPromptCheckpointTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.project = Path(temporary.name) / "project"
@@ -363,13 +375,15 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.prompt = "Review the queue"
         self.prepare_conversation()
 
-    def prepare_conversation(self):
+    def prepare_conversation(self) -> None:
         self.owner = app.VinApp()
         self.owner.project_dir = self.project
         buffer = Buffer()
         buffer.text = "next draft"
         buffer.cursor_position = 4
-        self.owner.session = SimpleNamespace(app=Mock(), default_buffer=buffer)
+        self.owner.session = PromptSession[str](input=DummyInput(), output=DummyOutput())
+        self.owner.session.default_buffer = buffer
+        self.owner.session.app = cast(Application[str], Mock(spec=Application))
         self.owner.messages = [{"role": "user", "content": "Earlier question"},
                                {"role": "assistant", "content": "Earlier answer"}]
         self.previous = deepcopy(self.owner.messages)
@@ -378,10 +392,10 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.owner.session_record = new_session(self.project, self.prompt)
         self.owner.active_turn = {"prompt": self.prompt, "tools_used": False}
         self.assertTrue(self.owner.checkpoint_session(force=True))
-        self.session_id = self.owner.session_record["id"]
+        self.session_id = present(self.owner.session_record)["id"]
 
-    async def run_turn(self, emitted):
-        def worker(credentials, model, request, events, cancel_event):
+    async def run_turn(self, emitted: Sequence[ReplyEvent]) -> Literal["error", "rate_limit"] | None:
+        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event) -> None:
             if any(kind == "tool_started" for kind, _ in emitted):
                 events.tools_used.set()
             for event in emitted:
@@ -392,11 +406,11 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
             self.owner.pending_reply = task
             return await asyncio.wait_for(task, timeout=2)
 
-    def saved(self):
-        return storage.load_session(self.project, self.session_id)
+    def saved(self) -> SessionRecord:
+        return present(storage.load_session(self.project, self.session_id))
 
-    async def test_completed_reply_persists_full_context_footer_and_idle_marker(self):
-        context = self.previous + [
+    async def test_completed_reply_persists_full_context_footer_and_idle_marker(self) -> None:
+        context: History = self.previous + [
             {"role": "user", "content": self.prompt},
             {"type": "reasoning", "encrypted_content": "fake-reasoning"},
             {"type": "message", "role": "assistant", "content": [
@@ -411,13 +425,14 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["messages"], context)
         assistant = next(entry for entry in saved["transcript"] if entry["role"] == "assistant")
         self.assertEqual(assistant["content"], "Final response")
+        assert "streaming" in assistant
         self.assertFalse(assistant["streaming"])
-        self.assertIn("Worked for", saved["transcript"][-1]["content"]["text"])
+        self.assertIn("Worked for", string_value(record_value(saved["transcript"][-1]["content"])["text"]))
         self.assertEqual(self.owner.saved_session_record, saved)
         self.assertIsNone(self.owner.pending_reply)
         self.assertEqual(self.owner.session.default_buffer.document, self.draft)
 
-    async def test_error_and_rate_limit_persist_failed_tool_diff_and_caution_context(self):
+    async def test_error_and_rate_limit_persist_failed_tool_diff_and_caution_context(self) -> None:
         for kind in ("error", "rate_limit"):
             with self.subTest(kind=kind):
                 self.prepare_conversation()
@@ -431,18 +446,18 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
                 saved = self.saved()
                 self.assertIsNone(saved["active_turn"])
                 tool = next(entry for entry in saved["transcript"] if entry["role"] == "tool")
-                self.assertEqual(tool["status"], "failed")
-                self.assertEqual(tool["diff"], diff)
+                self.assertEqual(tool.get("status"), "failed")
+                self.assertEqual(tool.get("diff"), diff)
                 self.assertEqual(saved["messages"][:-2], self.previous)
                 self.assertEqual(saved["messages"][-2], {"role": "user", "content": self.prompt})
-                self.assertIn("Changes may already exist", saved["messages"][-1]["content"])
-                self.assertIn("Failed after", saved["transcript"][-1]["content"]["text"])
+                self.assertIn("Changes may already exist", string_value(saved["messages"][-1]["content"]))
+                self.assertIn("Failed after", string_value(record_value(saved["transcript"][-1]["content"])["text"]))
                 self.assertEqual(self.owner.session.default_buffer.document, self.draft)
 
-    async def test_cancelled_reply_saves_interruption_and_ignores_late_worker_events(self):
+    async def test_cancelled_reply_saves_interruption_and_ignores_late_worker_events(self) -> None:
         stopped = Event()
 
-        def worker(credentials, model, request, events, cancel_event):
+        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event) -> None:
             try:
                 events.tools_used.set()
                 events.put(("tool_started", {"name": "read", "detail": "example.py"}))
@@ -475,19 +490,19 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         saved = self.saved()
         self.assertIsNone(saved["active_turn"])
         tool = next(entry for entry in saved["transcript"] if entry["role"] == "tool")
-        self.assertEqual(tool["status"], "interrupted")
+        self.assertEqual(tool.get("status"), "interrupted")
         assistant = [entry["content"] for entry in saved["transcript"] if entry["role"] == "assistant"]
         self.assertEqual(assistant, ["Partial response"])
-        self.assertIn("Changes may already exist", saved["messages"][-1]["content"])
-        self.assertIn("Interrupted after", saved["transcript"][-1]["content"]["text"])
+        self.assertIn("Changes may already exist", string_value(saved["messages"][-1]["content"]))
+        self.assertIn("Interrupted after", string_value(record_value(saved["transcript"][-1]["content"])["text"]))
         self.assertEqual(self.owner.session.default_buffer.document, self.draft)
 
 
-    async def start_controlled_turn(self):
-        queues = SimpleQueue()
+    async def start_controlled_turn(self) -> tuple[asyncio.Task[Literal["error", "rate_limit"] | None], ReplyEvents]:
+        queues: SimpleQueue[ReplyEvents] = SimpleQueue()
         release, stopped = Event(), Event()
 
-        def worker(credentials, model, request, events, cancel_event):
+        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event) -> None:
             try:
                 queues.put(events)
                 release.wait(3)
@@ -498,7 +513,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(self.owner.stream_reply(self.prompt))
         self.owner.pending_reply = task
 
-        async def cleanup():
+        async def cleanup() -> None:
             release.set()
             if not task.done():
                 task.cancel()
@@ -509,12 +524,12 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_until(lambda: not queues.empty())
         return task, queues.get()
 
-    async def wait_until(self, predicate):
+    async def wait_until(self, predicate: Callable[[], bool]) -> None:
         async with asyncio.timeout(2):
             while not predicate():
                 await asyncio.sleep(0.001)
 
-    async def test_tool_start_diff_and_finish_are_saved_while_reply_is_active(self):
+    async def test_tool_start_diff_and_finish_are_saved_while_reply_is_active(self) -> None:
         task, events = await self.start_controlled_turn()
         events.tools_used.set()
         events.put(("tool_started", {"name": "edit", "detail": "example.py"}))
@@ -522,21 +537,21 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
 
         saved = self.saved()
         self.assertEqual(saved["active_turn"], {"prompt": self.prompt, "tools_used": True})
-        self.assertEqual(saved["transcript"][-1]["status"], "running")
+        self.assertEqual(saved["transcript"][-1].get("status"), "running")
         self.assertEqual(saved["messages"], self.previous)
         self.assertFalse(task.done())
 
         diff = "--- f\n+++ f\n@@ -1 +1 @@\n-old\n+new\n"
         events.put(("tool_diff", diff))
         await self.wait_until(lambda: self.owner.transcript[-1].get("diff") == diff)
-        self.assertEqual(self.saved()["transcript"][-1]["diff"], diff)
+        self.assertEqual(self.saved()["transcript"][-1].get("diff"), diff)
 
         events.put(("tool_finished", {"name": "edit", "detail": "example.py"}))
         await self.wait_until(lambda: self.owner.tool_status == ("edit", "finished"))
         saved = self.saved()
-        self.assertEqual(saved["transcript"][-1]["status"], "finished")
-        self.assertEqual(saved["transcript"][-1]["diff"], diff)
-        self.assertTrue(saved["active_turn"]["tools_used"])
+        self.assertEqual(saved["transcript"][-1].get("status"), "finished")
+        self.assertEqual(saved["transcript"][-1].get("diff"), diff)
+        self.assertTrue(present(saved["active_turn"])["tools_used"])
         self.assertFalse(task.done())
         self.assertEqual(self.owner.session.default_buffer.document, self.draft)
 
@@ -545,11 +560,11 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.saved()["active_turn"])
 
 
-    def observe_idle_poll(self, events):
+    def observe_idle_poll(self, events: ReplyEvents) -> asyncio.Event:
         idle = asyncio.Event()
         get_nowait = events.get_nowait
 
-        def observed_get():
+        def observed_get() -> ReplyEvent:
             try:
                 return get_nowait()
             except Empty:
@@ -559,13 +574,13 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         events.get_nowait = observed_get
         return idle
 
-    async def test_paused_stream_flushes_buffered_text_once_at_the_deadline(self):
+    async def test_paused_stream_flushes_buffered_text_once_at_the_deadline(self) -> None:
         task, events = await self.start_controlled_turn()
         idle = self.observe_idle_poll(events)
         self.clock.return_value = 100.1
         with patch.object(conversations, "save_session", wraps=conversations.save_session) as writer:
             events.put(("text", "A buffered burst"))
-            await self.wait_until(lambda: self.owner.reply_entry["content"] == "A buffered burst")
+            await self.wait_until(lambda: present(self.owner.reply_entry)["content"] == "A buffered burst")
             writer.assert_not_called()
 
             self.clock.return_value = 100.5

@@ -3,6 +3,7 @@
 import asyncio
 from copy import deepcopy
 from time import monotonic
+from typing import TYPE_CHECKING
 
 from rich.text import Text
 
@@ -10,8 +11,11 @@ from vin.sessions.records import snapshot_session
 from vin.sessions.recovery import restore_session
 from vin.sessions.storage import list_sessions, load_session, save_session
 
+if TYPE_CHECKING:
+    from vin.tui.app import VinApp
 
-def checkpoint_session(owner, *, force=False):
+
+def checkpoint_session(owner: "VinApp", *, force: bool = False) -> bool:
     if owner.session_record is None:
         return False
 
@@ -54,7 +58,7 @@ def checkpoint_session(owner, *, force=False):
     return True
 
 
-async def resume_conversation(owner, query=None):
+async def resume_conversation(owner: "VinApp", query: str | None = None) -> str | None:
     records = list_sessions(owner.project_dir)
     query = (query or "").strip()
 
@@ -87,7 +91,8 @@ async def resume_conversation(owner, query=None):
                 options,
             )
         except asyncio.CancelledError:
-            if asyncio.current_task().cancelling():
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
                 raise
             return
 
@@ -107,7 +112,7 @@ async def resume_conversation(owner, query=None):
     return f"Resumed: {record['name']}"
 
 
-def rename_conversation(owner, name):
+def rename_conversation(owner: "VinApp", name: object) -> str | None:
     if owner.session_record is None:
         raise RuntimeError("No conversation to rename. Send a message first.")
     if not isinstance(name, str):

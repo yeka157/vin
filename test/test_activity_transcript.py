@@ -7,37 +7,43 @@ do not prescribe the shape of tool/timing records inside the application.
 import asyncio
 from queue import SimpleQueue
 from threading import Event
-from types import SimpleNamespace
+from collections.abc import Callable
+from typing import Literal
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
+from prompt_toolkit import PromptSession
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.input import DummyInput
+from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.document import Document
 from prompt_toolkit.keys import Keys
 
 from vin.tui import app as app_module, bindings, layout, transcript
+from vin.provider.events import ReplyEvent, ReplyEvents
+from vin.types import Credentials, History
+from test.tui_typing_helpers import key_event
 
 
 class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.owner = app_module.VinApp()
-        self.owner.session = SimpleNamespace(
-            app=Mock(), default_buffer=Buffer(document=Document("next draft", cursor_position=3)),
-        )
+        self.owner.session = PromptSession(input=DummyInput(), output=DummyOutput())
+        self.owner.session.default_buffer = Buffer(document=Document("next draft", cursor_position=3))
         self.now = 100.0
         for module in (app_module, bindings, layout, transcript):
             self.enterContext(patch.object(module, "monotonic", side_effect=lambda: self.now, create=True))
 
-    async def wait_until(self, predicate):
+    async def wait_until(self, predicate: Callable[[], bool]) -> None:
         async with asyncio.timeout(2):
             while not predicate():
                 await asyncio.sleep(.001)
 
-    async def start_turn(self, text="Inspect the file"):
+    async def start_turn(self, text: str = "Inspect the file") -> tuple[asyncio.Task[Literal["error", "rate_limit"] | None], ReplyEvents]:
         entered, release, stopped = Event(), Event(), Event()
-        queues = SimpleQueue()
+        queues: SimpleQueue[ReplyEvents] = SimpleQueue()
 
-        def worker(credentials, model, messages, events, cancel_event):
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
             try:
                 queues.put(events)
                 entered.set()
@@ -50,7 +56,7 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(self.owner.stream_reply(text))
         self.owner.pending_reply = task
 
-        async def cleanup():
+        async def cleanup() -> None:
             release.set()
             if not task.done():
                 task.cancel()
@@ -61,21 +67,21 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_until(entered.is_set)
         return task, queues.get_nowait()
 
-    async def emit(self, events, *items):
-        for kind, value in items:
-            if kind == "tool_started":
+    async def emit(self, events: ReplyEvents, *items: ReplyEvent) -> None:
+        for item in items:
+            if item[0] == "tool_started":
                 events.tools_used.set()
-            events.put((kind, value))
+            events.put(item)
         await self.wait_until(events.empty)
 
-    def visible(self, width=100):
+    def visible(self, width: int = 100) -> str:
         content = self.owner.transcript_control.create_content(width, 500)
         return "\n".join(
             "".join(fragment[1] for fragment in content.get_line(line))
             for line in range(content.line_count)
         )
 
-    def assert_live_tail(self, after, elapsed):
+    def assert_live_tail(self, after: str, elapsed: str) -> str:
         text = self.visible()
         self.assertEqual(text.count("Thinking…"), 1, "Keep exactly one live indicator in the transcript.")
         self.assertIn(f"Thinking… ({elapsed})", text)
@@ -85,7 +91,7 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
         return text
 
 
-    async def test_live_indicator_stays_below_streaming_text_and_tool_activity(self):
+    async def test_live_indicator_stays_below_streaming_text_and_tool_activity(self) -> None:
         _, events = await self.start_turn()
         await self.emit(events, ("text", "Checking the workspace."))
         self.now = 102.0
@@ -97,7 +103,7 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
         self.now = 106.0
         self.assert_live_tail("The file is valid.", "6s")
 
-    async def test_completed_turn_replaces_indicator_with_one_frozen_footer(self):
+    async def test_completed_turn_replaces_indicator_with_one_frozen_footer(self) -> None:
         task, events = await self.start_turn()
         await self.emit(events, ("text", "Verified."))
         self.now = 1542.0
@@ -112,7 +118,7 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.visible(), finished, "Finished timing must not keep ticking.")
 
 
-    async def test_failed_tool_and_request_do_not_show_a_success_footer(self):
+    async def test_failed_tool_and_request_do_not_show_a_success_footer(self) -> None:
         task, events = await self.start_turn()
         await self.emit(events, ("tool_started", "read"), ("tool_failed", "read"))
         self.now = 107.0
@@ -126,13 +132,13 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("thinking…", text)
 
 
-    async def test_keyboard_cancellation_freezes_interruption_footer_and_discards_late_events(self):
+    async def test_keyboard_cancellation_freezes_interruption_footer_and_discards_late_events(self) -> None:
         task, events = await self.start_turn()
         await self.emit(events, ("tool_started", "bash"))
         self.now = 109.0
         keys = bindings.create_bindings(self.owner)
         keys.get_bindings_for_keys((Keys.ControlC,))[-1].handler(
-            SimpleNamespace(app=self.owner.session.app)
+            key_event(self.owner.session.app, Keys.ControlC)
         )
         with self.assertRaises(asyncio.CancelledError):
             await task

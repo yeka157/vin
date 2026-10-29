@@ -1,11 +1,14 @@
 """Transcript message rendering, viewport scrolling, and mouse handling."""
 
 from io import StringIO
+from collections.abc import Callable, Sequence
+from types import NotImplementedType
+from typing import Literal, TypedDict
 
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
-from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.padding import Padding
@@ -13,9 +16,19 @@ from rich.text import Text
 
 from vin.tui.diff import print_diff as print_tool_diff
 from vin.tui.diff import format_edit_heading
+from vin.types import NoticeEntry, ToolEntry, TranscriptEntry
 
 
-def format_duration(seconds):
+class ToolGroup(TypedDict):
+    role: Literal["tool_group"]
+    entries: list[ToolEntry]
+
+
+type GroupedEntry = TranscriptEntry | ToolGroup
+type GroupHeader = tuple[int, int, ToolEntry]
+
+
+def format_duration(seconds: float) -> str:
     seconds = int(seconds)
     minutes, seconds = divmod(seconds, 60)
     hours, minutes = divmod(minutes, 60)
@@ -27,7 +40,7 @@ def format_duration(seconds):
         return f"{seconds}s"
 
 
-def print_user_message(console, text):
+def print_user_message(console: Console, text: str) -> None:
     console.print(
         Padding(
             Text("› " + text),
@@ -39,7 +52,13 @@ def print_user_message(console, text):
     console.print()
 
 
-def print_assistant_message(console, text, *, streaming=False, intermediate=False):
+def print_assistant_message(
+    console: Console,
+    text: str,
+    *,
+    streaming: bool = False,
+    intermediate: bool = False,
+) -> None:
     content = Text(text) if streaming else Markdown(text, code_theme="ansi_dark")
     console.print(
         Padding(content, (0, 0, 0, 1)),
@@ -47,9 +66,9 @@ def print_assistant_message(console, text, *, streaming=False, intermediate=Fals
     console.print()
 
 
-def group_tool_entries(entries):
-    result = []
-    current_group = None
+def group_tool_entries(entries: Sequence[TranscriptEntry]) -> list[GroupedEntry]:
+    result: list[GroupedEntry] = []
+    current_group: ToolGroup | None = None
     for entry in entries:
         if entry["role"] == "tool":
             if current_group is None:
@@ -63,7 +82,7 @@ def group_tool_entries(entries):
     return result
 
 
-def print_activity_entry(console, entry):
+def print_activity_entry(console: Console, entry: ToolEntry | NoticeEntry) -> None:
     heading = None
 
     if (
@@ -72,15 +91,21 @@ def print_activity_entry(console, entry):
         and entry.get("status") == "finished"
         and entry.get("diff")
     ):
-        heading = format_edit_heading(entry.get("detail", ""), entry["diff"])
+        heading = format_edit_heading(entry.get("detail", ""), entry.get("diff", ""))
 
     console.print(heading if heading is not None else entry["content"], markup=False)
     if entry["role"] == "tool" and entry.get("diff"):
-        print_tool_diff(console, entry["diff"])
+        print_tool_diff(console, entry.get("diff", ""))
     console.print()
 
 
-def render_transcript(entries, width, height, *, group_headers=None):
+def render_transcript(
+    entries: Sequence[TranscriptEntry],
+    width: int,
+    height: int,
+    *,
+    group_headers: list[GroupHeader] | None = None,
+) -> ANSI:
     if group_headers is not None:
         group_headers.clear()
     output = StringIO()
@@ -95,6 +120,7 @@ def render_transcript(entries, width, height, *, group_headers=None):
 
     grouped_entries = group_tool_entries(entries)
     for index, entry in enumerate(grouped_entries):
+        start_line = 0
         if entry["role"] == "user":
             print_user_message(transcript_console, entry["content"])
         elif entry["role"] == "assistant":
@@ -134,24 +160,24 @@ def render_transcript(entries, width, height, *, group_headers=None):
 
 
 class TranscriptControl(UIControl):
-    def __init__(self, get_entries) -> None:
+    def __init__(self, get_entries: Callable[[], Sequence[TranscriptEntry]]) -> None:
         self.get_entries = get_entries
-        self.top_line = None
+        self.top_line: int | None = None
         self.line_count = 1
         self.viewport_height = 1
-        self.group_headers = []
+        self.group_headers: list[GroupHeader] = []
         self.visible_start = 0
 
-    def scroll(self, lines):
+    def scroll(self, lines: int) -> None:
         last_top_line = max(0, self.line_count - self.viewport_height)
         current_top_line = last_top_line if self.top_line is None else self.top_line
         new_top_line = max(0, min(last_top_line, current_top_line + lines))
         self.top_line = None if new_top_line == last_top_line else new_top_line
 
-    def scroll_to_bottom(self):
+    def scroll_to_bottom(self) -> None:
         self.top_line = None
 
-    def mouse_handler(self, mouse_event):
+    def mouse_handler(self, mouse_event: MouseEvent) -> NotImplementedType | None:
         if mouse_event.event_type == MouseEventType.SCROLL_UP:
             self.scroll(-3)
         elif mouse_event.event_type == MouseEventType.SCROLL_DOWN:
@@ -173,7 +199,7 @@ class TranscriptControl(UIControl):
             return NotImplemented
         return None
 
-    def create_content(self, width: int, height: int | None):
+    def create_content(self, width: int, height: int | None) -> UIContent:
         text = render_transcript(
             self.get_entries(),
             max(1, width),
@@ -201,7 +227,7 @@ class TranscriptControl(UIControl):
         )
 
 
-def format_tool_group_summary(entries):
+def format_tool_group_summary(entries: Sequence[ToolEntry]) -> str:
     counts = {
         "running": 0,
         "finished": 0,
@@ -223,7 +249,7 @@ def format_tool_group_summary(entries):
     return " · ".join(parts)
 
 
-def is_tool_group_active(grouped_entries, index):
+def is_tool_group_active(grouped_entries: Sequence[GroupedEntry], index: int) -> bool:
     next = index + 1
     if next >= len(grouped_entries):
         return False

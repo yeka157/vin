@@ -4,29 +4,36 @@ from io import StringIO
 from pathlib import Path
 from threading import Event
 from unittest.mock import MagicMock, Mock, patch
+from typing import cast
+from vin.types import Credentials, Identity, JSONValue
 
 from vin.auth import chatgpt
 
 
 class LoginLifecycleTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.cancel = Event()
-        self.notices = []
-        self.callback = Mock()
-        self.callback.wait.return_value = True
+        self.notices: list[str] = []
+        self.callback_wait = Mock(return_value=True)
+        self.callback = Mock(wait=self.callback_wait)
         self.server = MagicMock()
-        self.server.__enter__.return_value = self.server
+        self.server_enter = cast(Mock, self.server.__enter__)
+        self.server_enter.return_value = self.server
+        self.server_exit = cast(Mock, self.server.__exit__)
+        self.server_shutdown = Mock()
+        self.server.shutdown = self.server_shutdown
         self.server.server_port = 12345
-        self.listener = Mock()
-        self.identity = {"iss": "https://auth.openai.com", "sub": "fake-account"}
-        self.tokens = {
+        self.listener_join = Mock()
+        self.listener = Mock(join=self.listener_join)
+        self.identity: Identity = {"iss": "https://auth.openai.com", "sub": "fake-account"}
+        self.tokens: dict[str, JSONValue] = {
             "access_token": "fake-access-token",
             "id_token": "fake-id-token",
             "scope": "openid profile chatgpt.tokens.use.direct",
         }
         self.credentials = {"access_token": "fake-access-token", "subject": "fake-account"}
 
-        def open_browser(url):
+        def open_browser(url: str) -> bool:
             self.server.callback_result = {"code": "fake-code", "client_id": "fake-client"}
             return True
 
@@ -60,7 +67,7 @@ class LoginLifecycleTests(unittest.TestCase):
         clock.start()
         self.addCleanup(clock.stop)
 
-    def login(self):
+    def login(self) -> Credentials | None:
         try:
             return chatgpt.login_with_chatgpt(
                 cancel_event=self.cancel, notify=self.notices.append
@@ -68,12 +75,12 @@ class LoginLifecycleTests(unittest.TestCase):
         except TypeError as error:
             self.fail(f"Sign-in notification/cancellation contract is missing or invalid: {error}")
 
-    def assert_closed(self):
-        self.server.shutdown.assert_called_once()
-        self.listener.join.assert_called_once()
-        self.server.__exit__.assert_called_once()
+    def assert_closed(self) -> None:
+        self.server_shutdown.assert_called_once()
+        self.listener_join.assert_called_once()
+        self.server_exit.assert_called_once()
 
-    def test_success_sends_notice_without_printing(self):
+    def test_success_sends_notice_without_printing(self) -> None:
         output = StringIO()
         with redirect_stdout(output):
             result = self.login()
@@ -87,7 +94,7 @@ class LoginLifecycleTests(unittest.TestCase):
         )
         self.assert_closed()
 
-    def test_missing_plan_permission_uses_notice_callback(self):
+    def test_missing_plan_permission_uses_notice_callback(self) -> None:
         self.tokens["scope"] = "openid profile"
 
         self.assertEqual(self.login(), self.credentials)
@@ -97,7 +104,7 @@ class LoginLifecycleTests(unittest.TestCase):
         )
         self.assert_closed()
 
-    def test_pre_cancelled_sign_in_does_not_open_browser_or_save(self):
+    def test_pre_cancelled_sign_in_does_not_open_browser_or_save(self) -> None:
         self.cancel.set()
 
         self.assertIsNone(self.login())
@@ -108,16 +115,16 @@ class LoginLifecycleTests(unittest.TestCase):
         self.pointer.assert_not_called()
         self.assertEqual(self.notices, ["Sign-in cancelled"])
 
-    def test_cancellation_while_waiting_closes_listener_without_requesting_tokens(self):
-        def cancel_while_waiting(timeout):
+    def test_cancellation_while_waiting_closes_listener_without_requesting_tokens(self) -> None:
+        def cancel_while_waiting(timeout: float) -> bool:
             self.cancel.set()
             return False
 
-        self.callback.wait.side_effect = cancel_while_waiting
+        self.callback_wait.side_effect = cancel_while_waiting
 
         self.assertIsNone(self.login())
 
-        self.callback.wait.assert_called_once_with(0.1)
+        self.callback_wait.assert_called_once_with(0.1)
         self.exchange.assert_not_called()
         self.save.assert_not_called()
         self.pointer.assert_not_called()
@@ -125,8 +132,8 @@ class LoginLifecycleTests(unittest.TestCase):
         self.assert_closed()
 
 
-    def test_cancellation_during_token_request_does_not_validate_or_save(self):
-        def exchange(*args):
+    def test_cancellation_during_token_request_does_not_validate_or_save(self) -> None:
+        def exchange(*args: object) -> dict[str, JSONValue]:
             self.cancel.set()
             return self.tokens
 
@@ -140,8 +147,8 @@ class LoginLifecycleTests(unittest.TestCase):
         self.assertEqual(self.notices, ["Sign-in cancelled"])
         self.assert_closed()
 
-    def test_cancellation_during_validation_does_not_save_credentials(self):
-        def validate(*args):
+    def test_cancellation_during_validation_does_not_save_credentials(self) -> None:
+        def validate(*args: object) -> Identity:
             self.cancel.set()
             return self.identity
 
@@ -155,7 +162,7 @@ class LoginLifecycleTests(unittest.TestCase):
         self.assert_closed()
 
 
-    def test_token_error_uses_notice_callback_and_closes_listener(self):
+    def test_token_error_uses_notice_callback_and_closes_listener(self) -> None:
         self.exchange.side_effect = RuntimeError("Could not request tokens")
 
         self.assertIsNone(self.login())

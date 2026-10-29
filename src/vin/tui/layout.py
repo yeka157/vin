@@ -1,11 +1,12 @@
 """Build the editable composer, panels, loading indicator, and application."""
 
 from time import monotonic
+from typing import TYPE_CHECKING
 
 from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.filters import Always, Condition
-from prompt_toolkit.layout import ConditionalContainer, DynamicContainer, HSplit, Window
+from prompt_toolkit.layout import Container, ConditionalContainer, DynamicContainer, HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
@@ -15,8 +16,11 @@ from prompt_toolkit.styles import Style
 from vin.tui.bindings import create_bindings
 from vin.tui.completion import SessionCompleter
 
+if TYPE_CHECKING:
+    from vin.tui.app import VinApp
 
-def build_workspace(app):
+
+def build_workspace(app: "VinApp") -> None:
     input_style = Style.from_dict(
         {
             "": "fg:#ffffff",
@@ -106,6 +110,7 @@ def build_workspace(app):
     )
 
     completion_menu = CompletionsMenu(max_height=5)
+    assert isinstance(completion_menu.content, Window)
     completion_menu.content.right_margins = []
 
     menu_area = ConditionalContainer(
@@ -148,11 +153,15 @@ def build_workspace(app):
         ]
     )
 
+    def current_panel() -> Container:
+        assert app.choice_menu is not None
+        return app.choice_menu
+
     panel = HSplit(
         [
             Window(height=1, char="─", style="fg:#a5b4fc"),
             Window(height=1),
-            DynamicContainer(lambda: app.choice_menu),
+            DynamicContainer(current_panel),
             Window(
                 FormattedTextControl("  Esc to return"),
                 height=1,

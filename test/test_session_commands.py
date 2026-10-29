@@ -1,6 +1,7 @@
 """Session commands with temporary storage and no provider calls."""
 
 import asyncio
+from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,10 +16,12 @@ from vin.sessions.records import new_session, snapshot_session
 from vin.sessions.transcript import encode_transcript
 from vin.tui import app
 from vin.tui.app import VinApp
+from vin.types import ActiveTurn, Credentials, History, SessionRecord, TranscriptEntry
+from session_typing_helpers import present, string_value, text_value
 
 
 class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -31,39 +34,29 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         self.owner.project_dir = self.project
         self.owner.session_record = new_session(self.project, "Current conversation")
         self.owner.messages = [{"role": "user", "content": "Keep current context"}]
-        self.owner.transcript = [{"role": "assistant", "content": Text("Keep display")}]
+        self.owner.transcript = [{"role": "assistant", "content": "Keep display"}]
         self.owner.last_session_checkpoint = 10.0
         self.owner.session_save_error = "Previous save warning"
-        self.owner.buffer = Buffer()
-        self.owner.buffer.text = "Unsent draft"
-        self.owner.buffer.cursor_position = 4
+        self.buffer = Buffer()
+        self.buffer.text = "Unsent draft"
+        self.buffer.cursor_position = 4
         self.picker = AsyncMock(side_effect=AssertionError("No picker should open here"))
         picker = patch.object(self.owner, "choose_inline", self.picker)
         picker.start()
         self.addCleanup(picker.stop)
 
-    def current_state(self):
+    def current_state(self) -> tuple[SessionRecord | None, SessionRecord | None, History, list[TranscriptEntry], ActiveTurn | None, float | None, str | None, str, int]:
         return deepcopy((
             self.owner.session_record, self.owner.saved_session_record,
             self.owner.messages, self.owner.transcript, self.owner.active_turn,
             self.owner.last_session_checkpoint, self.owner.session_save_error,
-            self.owner.buffer.text, self.owner.buffer.cursor_position,
+            self.buffer.text, self.buffer.cursor_position,
         ))
 
-    async def resume(self, *args):
-        helper = getattr(self.owner, "resume_conversation", None)
-        self.assertTrue(callable(helper), "Add async VinApp.resume_conversation(self).")
-        # Keep a missing query parameter an intentional assertion failure.
-        if args:
-            import inspect
-            try:
-                inspect.signature(helper).bind(*args)
-            except TypeError:
-                self.fail("Allow an optional title/ID argument in resume_conversation.")
-        return await helper(*args)
+    async def resume(self, query: str = "") -> str | None:
+        return await self.owner.resume_conversation(query)
 
-
-    async def test_picker_distinguishes_duplicate_names_and_cancel_keeps_current_conversation(self):
+    async def test_picker_distinguishes_duplicate_names_and_cancel_keeps_current_conversation(self) -> None:
         older = new_session(self.project, "Same name")
         older.update(created_at="2026-10-24T10:00:00+00:00",
                      updated_at="2026-10-24T10:00:00+00:00")
@@ -80,9 +73,9 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
             record["id"]: storage.session_path(self.project, record["id"]).read_bytes()
             for record in (older, newer)
         }
-        shown = []
+        shown: list[tuple[str, str]] = []
 
-        async def cancel_selection(message, options, default=None):
+        async def cancel_selection(message: str, options: Sequence[tuple[str, str]], default: str | None = None) -> str:
             shown.extend(options)
             raise asyncio.CancelledError()
 
@@ -101,14 +94,14 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         for session_id, original in saved_bytes.items():
             self.assertEqual(storage.session_path(self.project, session_id).read_bytes(), original)
 
-    async def test_app_task_cancellation_during_picker_is_not_swallowed(self):
+    async def test_app_task_cancellation_during_picker_is_not_swallowed(self) -> None:
         storage.save_session(self.project, new_session(self.project, "Saved conversation"))
         before = self.current_state()
         entered = asyncio.Event()
 
-        async def wait_for_selection(message, options, default=None):
+        async def wait_for_selection(message: str, options: Sequence[tuple[str, str]], default: str | None = None) -> str:
             entered.set()
-            await asyncio.Future()
+            return await asyncio.Future[str]()
 
         self.picker.side_effect = wait_for_selection
         task = asyncio.create_task(self.resume())
@@ -129,8 +122,8 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(task, return_exceptions=True)
 
 
-    def save_restorable_record(self, *, active=False):
-        messages = [
+    def save_restorable_record(self, *, active: bool = False) -> SessionRecord:
+        messages: History = [
             {"role": "user", "content": "Previous request"},
             {"type": "reasoning", "encrypted_content": "opaque-test-reasoning"},
             {"type": "function_call", "name": "read", "call_id": "saved-call",
@@ -138,7 +131,7 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
             {"type": "function_call_output", "call_id": "saved-call", "output": "Saved output"},
             {"role": "assistant", "content": "Previous answer"},
         ]
-        transcript = [
+        transcript: list[TranscriptEntry] = [
             {"role": "user", "content": "Previous request"},
             {"role": "tool", "name": "read", "status": "finished",
              "content": Text("Read example.py", style="dim"), "expanded": True},
@@ -160,13 +153,13 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         self.picker.return_value = record["id"]
         return record
 
-    async def test_selected_conversation_restores_context_display_and_followup_save_baseline(self):
+    async def test_selected_conversation_restores_context_display_and_followup_save_baseline(self) -> None:
         record = self.save_restorable_record()
         path = storage.session_path(self.project, record["id"])
         original_bytes = path.read_bytes()
         self.owner.selected_provider = "chatgpt"
         self.owner.selected_model = "current-model"
-        credentials = {"access_token": "fake-test-token"}
+        credentials: Credentials = {"issuer": "test", "subject": "user", "client_id": "test", "ext_agent_host_id": "test", "access_token": "fake-test-token"}
         self.owner.credentials = credentials
         self.owner.transcript_control.top_line = 12
 
@@ -186,21 +179,21 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.owner.pending_reply)
         self.assertIs(self.owner.credentials, credentials)
         self.assertEqual(self.owner.selected_model, "current-model")
-        self.assertEqual(self.owner.buffer.text, "Unsent draft")
-        self.assertEqual(self.owner.buffer.cursor_position, 4)
+        self.assertEqual(self.buffer.text, "Unsent draft")
+        self.assertEqual(self.buffer.cursor_position, 4)
         self.assertEqual(path.read_bytes(), original_bytes)
 
         self.owner.messages.append({"role": "user", "content": "Follow up"})
         self.owner.transcript.append({"role": "user", "content": "Follow up"})
-        self.owner.session_record["name"] = "Changed live label"
+        present(self.owner.session_record)["name"] = "Changed live label"
         self.assertEqual(self.owner.saved_session_record, record)
         self.assertTrue(self.owner.checkpoint_session(force=True))
-        saved = storage.load_session(self.project, record["id"])
+        saved = present(storage.load_session(self.project, record["id"]))
         self.assertEqual(saved["name"], "Changed live label")
         self.assertEqual(saved["messages"][-1]["content"], "Follow up")
         self.assertEqual(saved["id"], record["id"])
 
-    async def test_selected_partial_conversation_recovers_once_without_replaying_tools(self):
+    async def test_selected_partial_conversation_recovers_once_without_replaying_tools(self) -> None:
         record = self.save_restorable_record(active=True)
         path = storage.session_path(self.project, record["id"])
         original_bytes = path.read_bytes()
@@ -211,11 +204,12 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.owner.active_turn)
         self.assertEqual(len(self.owner.messages), 7, "Restore prior context and the pending request/caution.")
         self.assertEqual(self.owner.messages[-2], {"role": "user", "content": "Pending edit"})
-        self.assertIn("Changes may already exist", self.owner.messages[-1]["content"])
-        self.assertEqual(self.owner.transcript[-3]["status"], "interrupted")
-        self.assertEqual(self.owner.transcript[-3]["diff"], "-old\n+new\n")
+        self.assertIn("Changes may already exist", string_value(self.owner.messages[-1]["content"]))
+        self.assertEqual(self.owner.transcript[-3].get("status"), "interrupted")
+        self.assertEqual(self.owner.transcript[-3].get("diff"), "-old\n+new\n")
+        assert "streaming" in self.owner.transcript[-2]
         self.assertFalse(self.owner.transcript[-2]["streaming"])
-        self.assertEqual(self.owner.transcript[-1]["content"].plain, "Previous turn was interrupted.")
+        self.assertEqual(text_value(self.owner.transcript[-1]["content"]).plain, "Previous turn was interrupted.")
         self.assertEqual(self.owner.saved_session_record, record)
         self.assertEqual(path.read_bytes(), original_bytes)
         self.assertTrue(self.owner.checkpoint_session(force=True))
@@ -225,17 +219,17 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(notices), 1)
 
 
-    async def test_exact_title_and_full_id_resume_directly_without_opening_picker(self):
+    async def test_exact_title_and_full_id_resume_directly_without_opening_picker(self) -> None:
         record = self.save_restorable_record()
         self.picker.side_effect = AssertionError("An exact title/ID must bypass the picker.")
         for query in (record["name"], record["id"], f"  {record['name']}  "):
             with self.subTest(query=query):
                 await self.resume(query)
-                self.assertEqual(self.owner.session_record["id"], record["id"])
+                self.assertEqual(present(self.owner.session_record)["id"], record["id"])
                 self.assertEqual(self.owner.messages, record["messages"])
                 self.assertEqual(self.owner.saved_session_record, record)
 
-    async def test_missing_title_and_partial_id_preserve_current_conversation(self):
+    async def test_missing_title_and_partial_id_preserve_current_conversation(self) -> None:
         record = self.save_restorable_record()
         self.picker.side_effect = AssertionError("Unknown queries must not open the picker.")
         before = self.current_state()
@@ -245,7 +239,7 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
                     await self.resume(query)
                 self.assertEqual(self.current_state(), before)
 
-    async def test_duplicate_title_reports_ambiguity_but_full_id_selects_the_right_session(self):
+    async def test_duplicate_title_reports_ambiguity_but_full_id_selects_the_right_session(self) -> None:
         first = self.save_restorable_record()
         second = new_session(self.project, first["name"])
         storage.save_session(self.project, second)
@@ -257,5 +251,5 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
 
         await self.resume(first["id"])
 
-        self.assertEqual(self.owner.session_record["id"], first["id"])
+        self.assertEqual(present(self.owner.session_record)["id"], first["id"])
         self.assertEqual(self.owner.messages, first["messages"])

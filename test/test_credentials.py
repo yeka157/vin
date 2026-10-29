@@ -1,19 +1,22 @@
+import asyncio
 import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from vin.auth.credentials import save_private_json
+from vin.auth.credentials import load_credential_record, save_private_json
+from vin.types import Registration
+from vin.tui.app import VinApp
 
 
 class CredentialStorageTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.destination = Path(self.directory.name) / "account.json"
 
-    def test_saved_credentials_are_private(self):
+    def test_saved_credentials_are_private(self) -> None:
         data = {"access_token": "fake-token"}
 
         save_private_json(self.destination, data)
@@ -28,7 +31,42 @@ class CredentialStorageTests(unittest.TestCase):
             0o600,
         )
 
-    def test_failed_save_preserves_existing_credentials(self):
+    def test_registration_preserves_unvalidated_non_token_metadata(self) -> None:
+        registration: Registration = {
+            "issuer": "https://auth.openai.com",
+            "subject": "test-account",
+            "client_id": "issued-client",
+            "ext_agent_host_id": "test-host",
+            "scopes": 123,
+            "saved_at": [],
+            "expires_in": "later",
+            "token_type": False,
+        }
+        save_private_json(self.destination, registration)
+        saved = self.destination.read_bytes()
+
+        loaded = load_credential_record(self.destination)
+
+        self.assertEqual(loaded, registration)
+        self.assertEqual(self.destination.read_bytes(), saved)
+        assert loaded is not None
+        self.assertNotIn("access_token", loaded)
+        self.assertNotIn("refresh_token", loaded)
+        self.assertNotIn("id_token", loaded)
+        self.assertEqual(loaded.get("scopes"), 123)
+        self.assertEqual(loaded.get("saved_at"), [])
+        self.assertEqual(loaded.get("expires_in"), "later")
+        self.assertIs(loaded.get("token_type"), False)
+
+        app = VinApp()
+        app.credentials = loaded
+        with patch("vin.tui.app.refresh_credentials") as refresh:
+            self.assertIs(asyncio.run(app.prepare_request_credentials()), loaded)
+        refresh.assert_not_called()
+        self.assertIs(app.credentials, loaded)
+        self.assertEqual(app.credentials, registration)
+
+    def test_failed_save_preserves_existing_credentials(self) -> None:
         save_private_json(
             self.destination,
             {"access_token": "fake-old-token"},

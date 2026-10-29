@@ -1,31 +1,33 @@
 """Automatic activity collapse; independent click controls follow this increment."""
 
 import unittest
+from typing import Literal
 
 from prompt_toolkit.formatted_text import to_formatted_text
 from rich.text import Text
 
 from vin.tui.app import VinApp
 from vin.tui.transcript import render_transcript
+from vin.types import ToolEntry
 
 
 class ToolGroupRenderingTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.owner = VinApp()
 
-    def tool(self, name, detail, status="finished"):
+    def tool(self, name: str, detail: str, status: Literal["running", "finished", "failed", "interrupted"] = "finished") -> ToolEntry:
         return {
             "role": "tool", "name": name, "detail": detail, "status": status,
             "content": Text(f"● {name} {detail} · {status}", style="dim"),
         }
 
-    def visible(self, width=100):
+    def visible(self, width: int = 100) -> str:
         fragments = to_formatted_text(
             render_transcript(self.owner.get_transcript_entries(), width, 100)
         )
         return "".join(fragment[1] for fragment in fragments)
 
-    def test_active_group_keeps_completed_calls_visible_until_next_phase(self):
+    def test_active_group_keeps_completed_calls_visible_until_next_phase(self) -> None:
         self.owner.request_started_at = 1.0
         self.owner.transcript.extend([
             self.tool("read", "src/first.py"),
@@ -37,7 +39,7 @@ class ToolGroupRenderingTests(unittest.TestCase):
         self.assertGreater(text.index("Thinking…"), text.index("python -m unittest"))
         self.assertNotIn("2 tool calls", text)
 
-    def test_new_assistant_update_collapses_group_while_turn_remains_active(self):
+    def test_new_assistant_update_collapses_group_while_turn_remains_active(self) -> None:
         self.owner.request_started_at = 1.0
         self.owner.transcript.extend([
             self.tool("read", "src/first.py"),
@@ -54,7 +56,7 @@ class ToolGroupRenderingTests(unittest.TestCase):
         self.assertEqual(len(self.owner.transcript), 3, "Collapse must retain original records.")
 
 
-    def test_manually_reopened_closed_group_reveals_retained_diff(self):
+    def test_manually_reopened_closed_group_reveals_retained_diff(self) -> None:
         row = self.tool("edit", "src/example.py")
         row["diff"] = "--- f\n+++ f\n@@ -1 +1 @@\n-old\n+new\n"
         self.owner.transcript.append(row)
@@ -72,7 +74,7 @@ class ToolGroupRenderingTests(unittest.TestCase):
         self.assertNotIn("+ new", collapsed)
         self.assertIn("+new", row["diff"], "Closing details must retain the diff.")
 
-    def test_opening_one_group_leaves_other_finished_group_collapsed(self):
+    def test_opening_one_group_leaves_other_finished_group_collapsed(self) -> None:
         first = self.tool("read", "src/first.py")
         first["expanded"] = True
         self.owner.transcript.extend([

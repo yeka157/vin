@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from hmac import compare_digest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.client import HTTPResponse
 from secrets import token_urlsafe
 from threading import Event, Lock, Thread
 from time import sleep, monotonic
@@ -13,6 +14,14 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
 from jwt import PyJWKClient
+from jwt.algorithms import AllowedPublicKeys
+from collections.abc import Callable, Mapping
+from typing import Protocol, cast
+
+from vin.types import (
+    AccountRecord, AuthorizationCallback, Credentials, Registration, ExternalRecord, Identity, LoginAttempt,
+    is_list, is_record,
+)
 
 from .credentials import (
     ACTIVE_SESSION_PATH,
@@ -39,7 +48,7 @@ class TokenExchangeError(RuntimeError):
         "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused",
     })
 
-    def __init__(self, status_code, code=None):
+    def __init__(self, status_code: int, code: str | None = None) -> None:
         self.status_code = status_code
         self.code = code if code in self.LOGIN_CODES else None
         self.requires_login = self.code is not None
@@ -49,7 +58,7 @@ class TokenExchangeError(RuntimeError):
         super().__init__(message)
 
 
-def prepare_login_attempt():
+def prepare_login_attempt() -> LoginAttempt:
     state = token_urlsafe(32)
     nonce = token_urlsafe(32)
     code_verifier = token_urlsafe(32)
@@ -63,7 +72,12 @@ def prepare_login_attempt():
     }
 
 
-def build_authorization_url(attempt, host_id, redirect_uri, registration=None):
+def build_authorization_url(
+    attempt: LoginAttempt,
+    host_id: str,
+    redirect_uri: str,
+    registration: AccountRecord | None = None,
+) -> str:
     params = {
         "client_id": "dynamic_agent_client",
         "agent_name_hint": "Vin",
@@ -85,7 +99,11 @@ def build_authorization_url(attempt, host_id, redirect_uri, registration=None):
     return "https://auth.openai.com/api/accounts/authorize?" + urlencode(params)
 
 
-def parse_authorization_callback(callback_url, expected_state, expected_client_id=None):
+def parse_authorization_callback(
+    callback_url: str,
+    expected_state: str,
+    expected_client_id: str | None = None,
+) -> AuthorizationCallback:
     params = parse_qs(urlsplit(callback_url).query, keep_blank_values=True)
 
     states = params.get("state", [])
@@ -105,7 +123,7 @@ def parse_authorization_callback(callback_url, expected_state, expected_client_i
             raise ValueError("Callback client ID did not match")
         params["client_id"] = [expected_client_id]
 
-    result = {}
+    result: dict[str, str] = {}
     for field in ("code", "client_id"):
         values = params.get(field, [])
         if len(values) != 1 or not values[0]:
@@ -115,10 +133,10 @@ def parse_authorization_callback(callback_url, expected_state, expected_client_i
     if result["client_id"] == "dynamic_agent_client":
         raise ValueError("Expected an issued client ID")
 
-    return result
+    return {"code": result["code"], "client_id": result["client_id"]}
 
 
-def request_tokens(form):
+def request_tokens(form: Mapping[str, str]) -> ExternalRecord:
     request = Request(
         "https://auth.openai.com/api/accounts/oauth/token",
         data=urlencode(form).encode("ascii"),
@@ -127,18 +145,18 @@ def request_tokens(form):
     )
 
     try:
-        with urlopen(request, timeout=30) as response:
+        with cast(HTTPResponse, urlopen(request, timeout=30)) as response:
             if response.status != 200:
                 raise RuntimeError("Unexpected token response status")
-            tokens = json.load(response)
+            tokens = cast(object, json.load(response))
     except HTTPError as error:
         status = error.code
         code = None
         try:
-            payload = json.loads(error.read(8192))
-            if isinstance(payload, dict):
+            payload = cast(object, json.loads(error.read(8192)))
+            if is_record(payload):
                 detail = payload.get("error")
-                candidate = detail.get("code") if isinstance(detail, dict) else detail
+                candidate = detail.get("code") if is_record(detail) else detail
                 if isinstance(candidate, str) and candidate in TokenExchangeError.LOGIN_CODES:
                     code = candidate
         except (OSError, ValueError):
@@ -151,12 +169,14 @@ def request_tokens(form):
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise RuntimeError("Token endpoint returned invalid JSON") from None
 
-    if not isinstance(tokens, dict):
+    if not is_record(tokens):
         raise RuntimeError("Expected a JSON object from the token endpoint")
     return tokens
 
 
-def exchange_authorization_code(callback, attempt, redirect_uri):
+def exchange_authorization_code(
+    callback: AuthorizationCallback, attempt: LoginAttempt, redirect_uri: str
+) -> ExternalRecord:
     form = {
         "grant_type": "authorization_code",
         "client_id": callback["client_id"],
@@ -168,7 +188,7 @@ def exchange_authorization_code(callback, attempt, redirect_uri):
     return request_tokens(form)
 
 
-def exchange_refresh_token(credentials):
+def exchange_refresh_token(credentials: ExternalRecord) -> ExternalRecord:
     client_id = credentials.get("client_id")
     refresh_token = credentials.get("refresh_token")
 
@@ -191,7 +211,7 @@ def exchange_refresh_token(credentials):
     return request_tokens(form)
 
 
-def revoke_refresh_token(credentials):
+def revoke_refresh_token(credentials: ExternalRecord) -> bool:
     refresh_token = credentials.get("refresh_token")
     client_id = credentials.get("client_id")
     if (
@@ -205,15 +225,15 @@ def revoke_refresh_token(credentials):
 
     for attempt in range(2):
         try:
-            with urlopen(
+            with cast(HTTPResponse, urlopen(
                 OPENAI_ISSUER + "/.well-known/openid-configuration",
                 timeout=10,
-            ) as response:
-                metadata = json.load(response)
+            )) as response:
+                metadata = cast(object, json.load(response))
 
             endpoint = (
                 metadata.get("revocation_endpoint")
-                if isinstance(metadata, dict)
+                if is_record(metadata)
                 else None
             )
 
@@ -234,7 +254,7 @@ def revoke_refresh_token(credentials):
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 method="POST",
             )
-            with urlopen(request, timeout=10) as response:
+            with cast(HTTPResponse, urlopen(request, timeout=10)) as response:
                 return response.status == 200
         except HTTPError as error:
             status = error.code
@@ -251,23 +271,24 @@ def revoke_refresh_token(credentials):
     return False
 
 
-def validate_id_token(id_token, client_id, expected_nonce):
+def validate_id_token(id_token: object, client_id: str, expected_nonce: str) -> Identity:
     if not isinstance(id_token, str) or not id_token:
         raise RuntimeError("Token response did not contain an ID token")
 
     try:
         signing_key = JWKS_CLIENT.get_signing_key_from_jwt(id_token)
-        claims = jwt.decode(
+        claims = cast(object, jwt.decode(
             id_token,
-            signing_key.key,
+            cast(AllowedPublicKeys | str | bytes, signing_key.key),
             algorithms=["RS256"],
             issuer=OPENAI_ISSUER,
             audience=client_id,
             options={"require": ["iss", "aud", "exp", "iat", "sub", "nonce"]},
             leeway=5,
-        )
+        ))
     except (jwt.PyJWTError, ValueError, OSError):
         raise RuntimeError("ID token could not be verified") from None
+    assert is_record(claims)
     nonce = claims["nonce"]
     if not isinstance(nonce, str) or not compare_digest(
         nonce.encode("utf-8"), expected_nonce.encode("utf-8")
@@ -277,16 +298,18 @@ def validate_id_token(id_token, client_id, expected_nonce):
     if not isinstance(claims["sub"], str) or not claims["sub"]:
         raise RuntimeError("ID token did not contain a valid object")
 
-    if isinstance(claims["aud"], list) and len(claims["aud"]) > 1:
+    audience = claims["aud"]
+    if is_list(audience) and len(audience) > 1:
         if claims.get("azp") != client_id:
             raise RuntimeError("ID token authorized party did not match")
     elif "azp" in claims and claims["azp"] != client_id:
         raise RuntimeError("ID token authorized party did not match")
 
-    return claims
+    # PyJWT verifies the issuer; the checks above verify the subject and nonce.
+    return cast(Identity, claims)
 
 
-def refresh_credentials(credentials):
+def refresh_credentials(credentials: Credentials) -> Credentials:
     if not is_access_token_expired(credentials):
         return credentials
 
@@ -299,11 +322,13 @@ def refresh_credentials(credentials):
             "Refresh response did not contain a replacement refresh token"
         )
 
+    assert "scopes" in credentials
+    assert "id_token" in credentials
     scope_value = tokens.get("scope", " ".join(credentials["scopes"]))
     if not isinstance(scope_value, str):
         raise RuntimeError("Refresh response contained invalid scopes")
 
-    identity = {
+    identity: Identity = {
         "iss": credentials["issuer"],
         "sub": credentials["subject"],
         "email": credentials.get("email"),
@@ -322,34 +347,49 @@ def refresh_credentials(credentials):
     return updated
 
 
+class CallbackServerState(Protocol):
+    server_port: int
+    expected_state: str
+    expected_client_id: str | None
+    callback_result: AuthorizationCallback | None
+    callback_error: RuntimeError | None
+    callback_done: Event
+    callback_lock: Lock
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None: ...
+    def shutdown(self) -> None: ...
+
+
 class CallbackHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def do_GET(self) -> None:
         if urlsplit(self.path).path != "/auth/callback":
             self.send_error(404)
             return
 
-        with self.server.callback_lock:
-            if self.server.callback_done.is_set():
+        # login_with_chatgpt initializes this state before starting the listener.
+        server = cast(CallbackServerState, self.server)
+        with server.callback_lock:
+            if server.callback_done.is_set():
                 self.send_error(409, "Sign-in attempt already finished")
                 return
 
             try:
                 callback = parse_authorization_callback(
                     self.path,
-                    self.server.expected_state,
-                    self.server.expected_client_id,
+                    server.expected_state,
+                    server.expected_client_id,
                 )
             except ValueError:
                 self.send_error(400, "Invalid sign-in callback")
                 return
             except RuntimeError as error:
-                self.server.callback_error = error
+                server.callback_error = error
                 try:
                     self.send_error(400, "Sign-in was declined or failed")
                 finally:
-                    self.server.callback_done.set()
+                    server.callback_done.set()
                 return
-            self.server.callback_result = callback
+            server.callback_result = callback
 
             try:
                 self.send_response(200)
@@ -357,13 +397,18 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b"Callback received. Return to Vin.")
             finally:
-                self.server.callback_done.set()
+                server.callback_done.set()
 
-    def log_message(self, format, *args):
+    def log_message(self, format: str, *args: object) -> None:
         pass
 
 
-def login_with_chatgpt(registration=None, *, cancel_event=None, notify=print):
+def login_with_chatgpt(
+    registration: AccountRecord | None = None,
+    *,
+    cancel_event: Event | None = None,
+    notify: Callable[[str], object] = print,
+) -> Credentials | None:
     if cancel_event is not None and cancel_event.is_set():
         notify("Sign-in cancelled")
         return None
@@ -373,7 +418,8 @@ def login_with_chatgpt(registration=None, *, cancel_event=None, notify=print):
     if registration is not None and registration["ext_agent_host_id"] != host_id:
         raise RuntimeError("Saved registration belongs to a different host")
 
-    with ThreadingHTTPServer(("127.0.0.1", 0), CallbackHandler) as server:
+    with ThreadingHTTPServer(("127.0.0.1", 0), CallbackHandler) as http_server:
+        server = cast(CallbackServerState, http_server)
         redirect_uri = f"http://127.0.0.1:{server.server_port}/auth/callback"
         server.expected_state = attempt["state"]
         server.expected_client_id = (
@@ -401,8 +447,10 @@ def login_with_chatgpt(registration=None, *, cancel_event=None, notify=print):
                     raise TimeoutError("Sign-in timed out")
             if server.callback_error is not None:
                 raise server.callback_error
+            callback = server.callback_result
+            assert callback is not None
             tokens = exchange_authorization_code(
-                server.callback_result, attempt, redirect_uri
+                callback, attempt, redirect_uri
             )
             if cancel_event is not None and cancel_event.is_set():
                 notify("Sign-in cancelled")
@@ -410,7 +458,7 @@ def login_with_chatgpt(registration=None, *, cancel_event=None, notify=print):
             received_at = datetime.now(timezone.utc)
             identity = validate_id_token(
                 tokens.get("id_token"),
-                server.callback_result["client_id"],
+                callback["client_id"],
                 attempt["nonce"],
             )
             if registration is not None and (
@@ -427,7 +475,7 @@ def login_with_chatgpt(registration=None, *, cancel_event=None, notify=print):
             credentials = build_credential_record(
                 tokens,
                 identity,
-                server.callback_result["client_id"],
+                callback["client_id"],
                 host_id,
                 scopes,
                 received_at,
@@ -454,7 +502,9 @@ def login_with_chatgpt(registration=None, *, cancel_event=None, notify=print):
             listener.join()
 
 
-def logout_chatgpt(credentials, *, notify=print):
+def logout_chatgpt(
+    credentials: AccountRecord | None, *, notify: Callable[[str], object] = print
+) -> Registration | None:
     if credentials is None:
         return None
 
@@ -462,15 +512,19 @@ def logout_chatgpt(credentials, *, notify=print):
     if credentials.get("refresh_token"):
         remote_confirmed = revoke_refresh_token(credentials)
 
-    registration = {
-        field: credentials[field]
-        for field in ("issuer", "subject", "client_id", "ext_agent_host_id")
+    registration: Registration = {
+        "issuer": credentials["issuer"],
+        "subject": credentials["subject"],
+        "client_id": credentials["client_id"],
+        "ext_agent_host_id": credentials["ext_agent_host_id"],
     }
 
     registration["email"] = credentials.get("email")
 
-    credentials.clear()
-    credentials.update(registration)
+    # Preserve the caller's dictionary identity while removing token fields.
+    mutable_credentials = cast(dict[str, object], credentials)
+    mutable_credentials.clear()
+    mutable_credentials.update(registration)
     save_credential_record(registration)
 
     if not remote_confirmed:

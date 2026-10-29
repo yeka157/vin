@@ -1,3 +1,6 @@
+from typing import cast
+from vin.types import ModelPreference, is_record
+
 import json
 from pathlib import Path
 
@@ -5,11 +8,11 @@ from vin.auth.credentials import save_private_json
 
 PREFERENCES_PATH = Path.home() / ".config" / "vin" / "preferences.json"
 
-def load_model_preference():
+def load_model_preference() -> ModelPreference | None:
     try:
-        preference = json.loads(
+        preference = cast(object, json.loads(
             PREFERENCES_PATH.read_text(encoding="utf-8")
-        )
+        ))
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
@@ -17,7 +20,7 @@ def load_model_preference():
             "Could not read saved model preference."
         ) from None
 
-    if not isinstance(preference, dict):
+    if not is_record(preference):
         raise RuntimeError("Saved model preference is invalid.")
 
     model = preference.get("model")
@@ -25,9 +28,9 @@ def load_model_preference():
     if (preference.get("provider") != "chatgpt" or not isinstance(model, str) or not model.strip()):
         raise RuntimeError("Saved model preference is invalid.")
 
-    return preference
+    return cast(ModelPreference, preference)
 
-def save_model_preference(provider, model):
+def save_model_preference(provider: str, model: object) -> Path:
     if provider != "chatgpt" or not isinstance(model, str) or not model.strip():
         raise RuntimeError("Invalid model preference.")
 

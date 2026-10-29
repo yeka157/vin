@@ -2,13 +2,49 @@ import json
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from threading import Event
-from collections.abc import Callable
-from typing import TYPE_CHECKING
+from queue import SimpleQueue
+from collections.abc import Iterable
+from contextlib import AbstractContextManager
+from typing import TYPE_CHECKING, Literal, Protocol, cast, overload, runtime_checkable
+
+from vin.types import History, ModelMetadata, is_record, is_list, json_value
+from vin.provider.events import EventSender, ReplyEvent, TextEventKind, ToolEventKind, ToolStarted, TokenUsage
 import re
 
 if TYPE_CHECKING:
-    from openai import OpenAI
-    from openai.types.responses import Response
+    from http.client import HTTPResponse
+    from openai.types.responses import Response, ResponseOutputItem, ResponseStreamEvent, FunctionToolParam, ResponseIncludable
+    from openai.types.shared_params import Reasoning
+
+
+class WireResponses(Protocol):
+    def create(
+        self, *, model: str, input: History, instructions: str,
+        tools: list["FunctionToolParam"], reasoning: "Reasoning",
+        include: list["ResponseIncludable"], store: bool, stream: Literal[True],
+    ) -> AbstractContextManager[Iterable["ResponseStreamEvent"]]: ...
+
+
+@runtime_checkable
+class WireClient(Protocol):
+    responses: WireResponses
+
+
+def _wire_client(client: object) -> WireClient:
+    # The SDK serializes wire JSON, including opaque saved/future provider items.
+    # Its frozen input union cannot describe that forward-compatible history.
+    if not isinstance(client, WireClient):
+        raise TypeError("OpenAI client does not expose Responses.")
+    return client
+
+
+@runtime_checkable
+class SetMarker(Protocol):
+    def set(self) -> object: ...
+
+
+def _has_output_item(item: "ResponseOutputItem | None") -> bool:
+    return item is not None
 
 
 class _AgentError(RuntimeError):
@@ -33,8 +69,8 @@ SYSTEM_PROMPT = (
 )
 
 
-def list_chatgpt_models(credentials):
-    if not credentials:
+def list_chatgpt_models(credentials: object) -> list[ModelMetadata]:
+    if not is_record(credentials) or not credentials:
         raise RuntimeError("Sign in with ChatGPT account first.")
 
     access_token = credentials.get("access_token")
@@ -42,7 +78,7 @@ def list_chatgpt_models(credentials):
         raise RuntimeError("Sign in with ChatGPT account first.")
 
     scopes = credentials.get("scopes", [])
-    if "chatgpt.tokens.use.direct" not in scopes:
+    if not is_list(scopes) or "chatgpt.tokens.use.direct" not in scopes:
         raise RuntimeError(
             "ChatGPT plan usage is not enabled. "
             "Sign in again and allow ChatGPT plan usage."
@@ -58,8 +94,8 @@ def list_chatgpt_models(credentials):
     )
 
     try:
-        with urlopen(request, timeout=60) as response:
-            payload = json.load(response)
+        with cast("HTTPResponse", urlopen(request, timeout=60)) as response:
+            payload = cast(object, json.load(response))
     except HTTPError as error:
         status = error.code
         error.close()
@@ -69,12 +105,14 @@ def list_chatgpt_models(credentials):
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise RuntimeError("Model endpoint returned invalid JSON.") from None
 
-    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+    if not is_record(payload) or not is_list(payload.get("models")):
         raise RuntimeError("Model endpoint returned an invalid model list.")
 
-    models = []
-    for model in payload["models"]:
-        if not isinstance(model, dict):
+    raw_models = payload["models"]
+    assert is_list(raw_models)
+    models: list[ModelMetadata] = []
+    for model in raw_models:
+        if not is_record(model):
             raise RuntimeError("Model endpoint returned an invalid model entry.")
 
         if model.get("visibility") != "list":
@@ -85,18 +123,18 @@ def list_chatgpt_models(credentials):
             if not isinstance(value, str) or not value.strip():
                 raise RuntimeError(f"Model endpoint returned an invalid {field}.")
 
-        models.append(model)
+        models.append(cast(ModelMetadata, model))
 
     return models
 
 
 def _tool_detail(name: str, arguments: str) -> str:
     try:
-        payload = json.loads(arguments)
+        payload = cast(object, json.loads(arguments))
     except json.JSONDecodeError:
         return ""
 
-    if not isinstance(payload, dict):
+    if not is_record(payload):
         return ""
 
     keys = {
@@ -128,7 +166,7 @@ def _execute_tool(
     name: str,
     arguments: str,
     cancel_event: Event,
-    send: Callable[[str, str], None] | None = None,
+    send: EventSender | None = None,
 ) -> str:
     from vin.tools import (
         TOOL_REGISTRY,
@@ -171,10 +209,10 @@ def _execute_tool(
 
 
 def _request_response(
-    client: "OpenAI",
+    client: WireClient,
     model: str,
-    inputs: list[dict],
-    send: Callable[[str, str], None],
+    inputs: History,
+    send: EventSender,
     cancel_event: Event,
 ) -> tuple["Response", bool] | None:
     from vin.tools import _response_tools
@@ -182,9 +220,9 @@ def _request_response(
     if cancel_event.is_set():
         return None
 
-    streamed_text = []
-    completed_output = {}
-    added_output = set()
+    streamed_text: list[str] = []
+    completed_output: dict[int, "ResponseOutputItem"] = {}
+    added_output: set[int] = set()
 
     with client.responses.create(
         model=model,
@@ -203,13 +241,13 @@ def _request_response(
             if cancel_event.is_set():
                 return None
 
-            if event.type in ("response.output_text.delta", "response.refusal.delta"):
+            if event.type == "response.output_text.delta" or event.type == "response.refusal.delta":
                 if event.delta:
                     streamed_text.append(event.delta)
                     send("text", event.delta)
 
             elif event.type == "response.output_item.added":
-                if event.item is not None:
+                if _has_output_item(event.item):
                     added_output.add(event.output_index)
 
             elif event.type == "response.output_item.done":
@@ -269,12 +307,12 @@ def _request_response(
 
 
 def _run_agent_turn(
-    client: "OpenAI",
+    client: WireClient,
     model: str,
-    inputs: list[dict],
-    send: Callable[[str, str | dict[str, str]], None],
+    inputs: History,
+    send: EventSender,
     cancel_event: Event,
-) -> list[dict] | None:
+) -> History | None:
     history = list(inputs)
 
     for _ in range(16):
@@ -296,7 +334,11 @@ def _run_agent_turn(
         if any(call.status != "completed" for call in calls):
             raise _AgentError("Response contains an incomplete tool call.")
 
-        history.extend(item.model_dump(exclude_none=True) for item in response.output)
+        for item in response.output:
+            dumped = json_value(cast(object, item.model_dump(exclude_none=True)))
+            if not isinstance(dumped, dict):
+                raise _AgentError("ChatGPT returned invalid response output.")
+            history.append(dumped)
 
         if not calls:
             if not has_text:
@@ -340,26 +382,47 @@ def _run_agent_turn(
     raise _AgentError("Model request limit exceeded: maximum 16.")
 
 
-def stream_chatgpt_response(credentials, model, messages, events, cancel_event):
+def stream_chatgpt_response(credentials: object, model: object, messages: History, events: SimpleQueue[ReplyEvent], cancel_event: Event) -> None:
     """Run on a worker thread; publish text, complete, or error queue events."""
 
-    def send(kind, value=None):
+    @overload
+    def send(kind: TextEventKind, value: str) -> None: ...
+    @overload
+    def send(kind: ToolEventKind, value: ToolStarted | str) -> None: ...
+    @overload
+    def send(kind: Literal["usage"], value: TokenUsage) -> None: ...
+    @overload
+    def send(kind: Literal["complete"], value: History | None) -> None: ...
+    def send(kind: TextEventKind | ToolEventKind | Literal["usage", "complete"], value: str | ToolStarted | TokenUsage | History | None = None) -> None:
         if kind == "tool_started":
-            marker = getattr(events, "tools_used", None)
-            if marker is not None:
+            marker = cast(object, getattr(events, "tools_used", None))
+            if isinstance(marker, SetMarker):
                 marker.set()
-        if not cancel_event.is_set():
+        if cancel_event.is_set():
+            return
+        if kind in ("text", "tool_diff", "error", "rate_limit") and isinstance(value, str):
+            events.put((kind, value))
+        elif kind in ("tool_started", "tool_finished", "tool_failed"):
+            if isinstance(value, str):
+                events.put((kind, value))
+            elif isinstance(value, dict) and "name" in value:
+                events.put((kind, value))
+        elif kind == "usage" and isinstance(value, dict) and "input_tokens" in value:
+            events.put((kind, value))
+        elif kind == "complete" and (value is None or isinstance(value, list)):
             events.put((kind, value))
 
     if cancel_event.is_set():
         return
 
-    access_token = (credentials or {}).get("access_token")
+    credential_fields = credentials if is_record(credentials) else {}
+    access_token = credential_fields.get("access_token")
     if not isinstance(access_token, str) or not access_token.strip():
         send("error", "Sign in with /login before sending a message.")
         return
 
-    if "chatgpt.tokens.use.direct" not in (credentials.get("scopes") or []):
+    scopes: object = credential_fields.get("scopes") or list[object]()
+    if not is_list(scopes) or "chatgpt.tokens.use.direct" not in scopes:
         send("error", "ChatGPT plan usage is not enabled. Sign in again with /login.")
         return
 
@@ -369,8 +432,7 @@ def stream_chatgpt_response(credentials, model, messages, events, cancel_event):
 
     import openai
 
-    outcome = ("error", "ChatGPT stream ended before completion.")
-    has_text = False
+    outcome: tuple[Literal["error", "rate_limit"], str] | tuple[Literal["complete"], History] = ("error", "ChatGPT stream ended before completion.")
 
     try:
         with openai.OpenAI(
@@ -379,7 +441,7 @@ def stream_chatgpt_response(credentials, model, messages, events, cancel_event):
             timeout=60,
             max_retries=0,
         ) as client:
-            history = _run_agent_turn(client, model, messages, send, cancel_event)
+            history = _run_agent_turn(_wire_client(client), model, messages, send, cancel_event)
             if history is None:
                 return
             outcome = ("complete", history)
@@ -408,4 +470,7 @@ def stream_chatgpt_response(credentials, model, messages, events, cancel_event):
     except Exception:
         outcome = ("error", "ChatGPT request failed. Please try again.")
 
-    send(*outcome)
+    if outcome[0] == "complete":
+        send("complete", outcome[1])
+    else:
+        send(outcome[0], outcome[1])
