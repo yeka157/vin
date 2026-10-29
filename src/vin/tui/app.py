@@ -469,7 +469,19 @@ class VinApp:
                             ]
                         )
                     else:
+                        newly_compacted = any(
+                            item.get("type") == "compaction"
+                            and item not in self.messages
+                            for item in value
+                        )
                         self.messages[:] = value
+                        if newly_compacted:
+                            self.transcript.append(
+                                {
+                                    "role": "notice",
+                                    "content": "Conversation compacted.",
+                                }
+                            )
                     completed = True
                     return
                 elif event[0] == "error" or event[0] == "rate_limit":

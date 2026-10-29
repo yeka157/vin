@@ -468,6 +468,51 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
             ["user", "tool", "assistant", "notice"],
         )
 
+    async def test_new_compaction_saves_notice_full_transcript_and_same_session(self) -> None:
+        self.owner.transcript.insert(0, {
+            "role": "tool", "name": "edit", "status": "finished",
+            "content": "Edited example.py", "diff": "-old\n+new\n",
+        })
+        previous_transcript = deepcopy(self.owner.transcript)
+        context: History = [
+            {"type": "compaction", "id": "cmp_new", "encrypted_content": "fake-opaque-context"},
+            {"role": "assistant", "content": "Final response"},
+        ]
+
+        self.assertIsNone(await self.run_turn([("text", "Final response"), ("complete", context)]))
+
+        self.assertEqual(self.owner.transcript[:len(previous_transcript)], previous_transcript)
+        self.assertEqual(self.owner.messages, context)
+        saved = self.saved()
+        self.assertEqual(saved["id"], self.session_id)
+        self.assertEqual(saved["messages"], context)
+        notices = [entry for entry in saved["transcript"]
+                   if entry["role"] == "notice" and entry["content"] == "Conversation compacted."]
+        self.assertEqual(len(notices), 1)
+
+        await self.owner.resume_conversation(self.session_id)
+        self.assertEqual(self.owner.messages, context)
+        self.assertEqual(present(self.owner.session_record)["id"], self.session_id)
+        self.assertEqual(self.owner.transcript[0].get("diff"), "-old\n+new\n")
+        self.assertEqual(sum(entry["role"] == "notice" and entry["content"] == "Conversation compacted."
+                             for entry in self.owner.transcript), 1)
+
+    async def test_existing_compaction_does_not_repeat_completion_notice(self) -> None:
+        self.owner.messages = [
+            {"type": "compaction", "id": "cmp_existing", "encrypted_content": "fake-saved-context"},
+            {"role": "assistant", "content": "Previous answer"},
+        ]
+        context: History = deepcopy(self.owner.messages) + [
+            {"role": "user", "content": self.prompt},
+            {"role": "assistant", "content": "Final response"},
+        ]
+
+        self.assertIsNone(await self.run_turn([("text", "Final response"), ("complete", context)]))
+
+        self.assertFalse(any(entry["role"] == "notice" and entry["content"] == "Conversation compacted."
+                             for entry in self.owner.transcript))
+        self.assertEqual(self.saved()["messages"], context)
+
     async def test_completed_reply_persists_full_context_footer_and_idle_marker(self) -> None:
         context: History = self.previous + [
             {"role": "user", "content": self.prompt},
