@@ -44,10 +44,19 @@ from vin.tui import conversations
 from vin.tui.constants import PROVIDER_LABELS, is_command
 from vin.tui.layout import build_workspace
 from vin.tui.transcript import TranscriptControl, format_duration, render_transcript
-from vin.provider.events import ReplyEvents
+from vin.provider.events import ReplyEvents, TokenUsage
 from vin.types import (
-    AccountRecord, ActiveTurn, AssistantEntry, Credentials, Registration, History, ModelMetadata,
-    ModelPreference, SessionRecord, ToolEntry, TranscriptEntry,
+    AccountRecord,
+    ActiveTurn,
+    AssistantEntry,
+    Credentials,
+    Registration,
+    History,
+    ModelMetadata,
+    ModelPreference,
+    SessionRecord,
+    ToolEntry,
+    TranscriptEntry,
 )
 
 
@@ -135,7 +144,9 @@ def model_display_name(models: Sequence[ModelMetadata], slug: str) -> str:
 def restore_chatgpt_model(
     transcript: list[TranscriptEntry], models: Sequence[ModelMetadata]
 ) -> ModelPreference:
-    preference: ModelPreference | None = get_chatgpt_model_preference(transcript, models)
+    preference: ModelPreference | None = get_chatgpt_model_preference(
+        transcript, models
+    )
     if preference is None:
         selected_model = choose_chatgpt_model(models)
         preference = {"provider": "chatgpt", "model": selected_model}
@@ -179,7 +190,9 @@ class VinApp:
         self.messages: History = []
         self.transcript: list[TranscriptEntry] = []
         self.transcript_control = TranscriptControl(self.get_transcript_entries)
-        self.pending_reply: asyncio.Task[Literal["error", "rate_limit"] | None] | None = None
+        self.pending_reply: (
+            asyncio.Task[Literal["error", "rate_limit"] | None] | None
+        ) = None
         self.loading_model = False
         self.submitted: asyncio.Queue[str | None] = asyncio.Queue()
         self.choice_menu: Container | None = None
@@ -193,7 +206,10 @@ class VinApp:
         self.queue_paused = False
         self.request_started_at: float | None = None
         self.last_request_duration: float | None = None
-        self.tool_status: tuple[str, Literal["running", "finished", "failed"]] | None = None
+        self.last_usage: TokenUsage | None = None
+        self.tool_status: (
+            tuple[str, Literal["running", "finished", "failed"]] | None
+        ) = None
         self._credential_refresh: asyncio.Task[Credentials] | None = None
         self.project_dir: Path = LAUNCH_DIR
         self.session_record: SessionRecord | None = None
@@ -387,6 +403,8 @@ class VinApp:
                         self.transcript.append(entry)
                     entry["content"] += event[1]
                     text_dirty = True
+                elif event[0] == "usage":
+                    self.last_usage = event[1].copy()
                 elif event[0] == "tool_diff":
                     if tool_entry is not None and tool_entry["name"] == "edit":
                         tool_entry["diff"] = event[1]
@@ -399,9 +417,9 @@ class VinApp:
                     name = value["name"] if isinstance(value, dict) else value
                     detail = value.get("detail", "") if isinstance(value, dict) else ""
                     state: Literal["running", "finished", "failed"] = (
-                        "running" if kind == "tool_started"
-                        else "finished" if kind == "tool_finished"
-                        else "failed"
+                        "running"
+                        if kind == "tool_started"
+                        else "finished" if kind == "tool_finished" else "failed"
                     )
                     self.tool_status = (name, state)
                     if kind == "tool_started":
@@ -781,13 +799,12 @@ class VinApp:
                     self.checkpoint_session(force=True)
 
         with patch_stdout(raw=True):
+
             def start_receiver() -> None:
                 self.app.create_background_task(receive_messages())
 
             try:
-                return await self.app.run_async(
-                    pre_run=start_receiver
-                )
+                return await self.app.run_async(pre_run=start_receiver)
             finally:
                 task = self.pending_reply
                 if task is not None:
@@ -858,7 +875,9 @@ class VinApp:
                 f"No {provider_name} models are available for this account."
             )
 
-        preference: ModelPreference | None = get_chatgpt_model_preference(self.transcript, models)
+        preference: ModelPreference | None = get_chatgpt_model_preference(
+            self.transcript, models
+        )
         if preference is None:
             selected_model = await self.choose_inline(
                 f"Choose a {provider_name} model",

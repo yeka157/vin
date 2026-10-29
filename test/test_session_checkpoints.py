@@ -23,7 +23,7 @@ from vin.sessions import storage
 from vin.sessions.records import new_session, snapshot_session
 from vin.tui import app, conversations
 from vin.types import Credentials, History, SessionRecord
-from vin.provider.events import ReplyEvent, ReplyEvents
+from vin.provider.events import ReplyEvent, ReplyEvents, TokenUsage
 from session_typing_helpers import list_value, present, record_value, string_value, text_value
 
 
@@ -408,6 +408,40 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
 
     def saved(self) -> SessionRecord:
         return present(storage.load_session(self.project, self.session_id))
+
+    async def test_latest_response_usage_is_retained_without_changing_conversation(self) -> None:
+        self.assertIsNone(self.owner.last_usage)
+        first: TokenUsage = {
+            "input_tokens": 1200, "output_tokens": 100, "total_tokens": 1300,
+        }
+        latest: TokenUsage = {
+            "input_tokens": 1500, "output_tokens": 50, "total_tokens": 1550,
+        }
+        expected = latest.copy()
+        context: History = self.previous + [
+            {"role": "user", "content": self.prompt},
+            {"role": "assistant", "content": "Final response"},
+        ]
+
+        self.assertIsNone(await self.run_turn([
+            ("usage", first),
+            ("tool_started", {"name": "read", "detail": "README.md"}),
+            ("tool_finished", "read"),
+            ("usage", latest),
+            ("text", "Final response"),
+            ("complete", context),
+        ]))
+
+        self.assertEqual(self.owner.last_usage, expected)
+        latest["input_tokens"] = 9999
+        self.assertEqual(self.owner.last_usage, expected)
+        self.assertEqual(self.owner.messages, context)
+        saved = self.saved()
+        self.assertEqual(saved["messages"], context)
+        self.assertEqual(
+            [entry["role"] for entry in saved["transcript"]],
+            ["user", "tool", "assistant", "notice"],
+        )
 
     async def test_completed_reply_persists_full_context_footer_and_idle_marker(self) -> None:
         context: History = self.previous + [
