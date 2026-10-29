@@ -11,6 +11,7 @@ from openai.types.responses import (
     ResponseFunctionToolCallParam,
     ResponseOutputMessageParam,
     ResponseReasoningItemParam,
+    ResponseCompactionItemParamParam,
 )
 from openai.types.responses.response_output_text_param import Logprob
 from openai.types.shared_params import Reasoning
@@ -48,7 +49,7 @@ class ClientDouble:
         self.close()
 
 
-type OutputItem = ResponseFunctionToolCallParam | ResponseOutputMessageParam | ResponseReasoningItemParam
+type OutputItem = ResponseFunctionToolCallParam | ResponseOutputMessageParam | ResponseReasoningItemParam | ResponseCompactionItemParamParam
 
 
 class WireInputTokens(TypedDict):

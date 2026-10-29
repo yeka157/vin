@@ -23,6 +23,7 @@ import httpx2
 import openai
 from openai.types.responses import (
     ResponseCompletedEvent,
+    ResponseCompactionItemParamParam,
     ResponseFunctionToolCallParam,
     ResponseOutputMessageParam,
     ResponseOutputRefusalParam,
@@ -192,6 +193,45 @@ class AgentLoopHTTPTests(unittest.TestCase):
 
         self.assertIn(('tool_started', {'name': 'read', 'detail': 'f'}), events)
         self.assertIn(('tool_finished', 'read'), events)
+
+    def test_native_checkpoint_replaces_prefix_before_tools_and_followup(self) -> None:
+        checkpoint: ResponseCompactionItemParamParam = {
+            'type': 'compaction', 'id': 'cmp_test', 'encrypted_content': 'fake-opaque-context',
+        }
+        original = deepcopy(self.input)
+        events = self.run_stream([
+            [item_done(checkpoint), item_done(call(), 1), completed([])],
+            [delta(), completed([message()])],
+        ])
+
+        self.assertEqual(len(self.requests), 2)
+        replay = self.requests[1]['input']
+        self.assertEqual(len(replay), 3)
+        self.assertEqual(replay[0], checkpoint)
+        self.assert_subset(call(), replay[1])
+        self.assertEqual(replay[2], {
+            'type': 'function_call_output', 'call_id': 'call_1', 'output': 'tool result',
+        })
+        self.assertEqual(len(self.executions), 1)
+        complete = next(event[1] for event in events if event[0] == 'complete')
+        assert complete is not None
+        self.assertEqual(complete[:3], replay)
+        self.assertEqual(len(complete), 4)
+        self.assertEqual(self.input, original)
+
+    def test_existing_checkpoint_does_not_prune_without_new_compaction_output(self) -> None:
+        self.input = [
+            {'role': 'user', 'content': 'Retained user input before a saved checkpoint'},
+            {'type': 'compaction', 'id': 'cmp_saved', 'encrypted_content': 'fake-saved-context'},
+            {'role': 'user', 'content': 'Continue the task'},
+        ]
+        original = deepcopy(self.input)
+        events = self.run_stream([[delta(), completed([message()])]])
+
+        complete = next(event[1] for event in events if event[0] == 'complete')
+        assert complete is not None
+        self.assertEqual(complete[:len(original)], original)
+        self.assertEqual(self.input, original)
 
     def test_each_completed_response_reports_its_own_usage_before_followup_work(self) -> None:
         first = completed([call()])

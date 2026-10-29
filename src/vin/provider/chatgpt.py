@@ -380,6 +380,9 @@ def _run_agent_turn(
                 raise _AgentError("ChatGPT returned invalid response output.")
             history.append(dumped)
 
+        if any(item.type == "compaction" for item in response.output):
+            history = context_after_compaction(history)
+
         if not calls:
             if not has_text:
                 types = sorted(
