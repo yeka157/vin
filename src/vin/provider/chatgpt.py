@@ -5,7 +5,17 @@ from threading import Event
 from queue import SimpleQueue
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Literal, Protocol, cast, overload, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    Protocol,
+    TypedDict,
+    cast,
+    overload,
+    runtime_checkable,
+)
+
+from openai.types.responses.response_create_params import ContextManagement
 
 from vin.types import History, ModelMetadata, is_record, is_list, json_value
 from vin.provider.events import (
@@ -30,6 +40,10 @@ if TYPE_CHECKING:
     from openai.types.shared_params import Reasoning
 
 
+class CompactionOptions(TypedDict, total=False):
+    context_management: list["ContextManagement"]
+
+
 class WireResponses(Protocol):
     def create(
         self,
@@ -42,6 +56,7 @@ class WireResponses(Protocol):
         include: list["ResponseIncludable"],
         store: bool,
         stream: Literal[True],
+        context_management: list["ContextManagement"] = ...,
     ) -> AbstractContextManager[Iterable["ResponseStreamEvent"]]: ...
 
 
@@ -238,6 +253,8 @@ def _request_response(
     inputs: History,
     send: EventSender,
     cancel_event: Event,
+    *,
+    compact_threshold: int | None = None,
 ) -> tuple["Response", bool] | None:
     from vin.tools import _response_tools
 
@@ -248,6 +265,15 @@ def _request_response(
     completed_output: dict[int, "ResponseOutputItem"] = {}
     added_output: set[int] = set()
 
+    options: CompactionOptions = {}
+    if compact_threshold is not None:
+        options["context_management"] = [
+            {
+                "type": "compaction",
+                "compact_threshold": compact_threshold,
+            }
+        ]
+
     with client.responses.create(
         model=model,
         input=inputs,
@@ -257,6 +283,7 @@ def _request_response(
         include=["reasoning.encrypted_content"],
         store=False,
         stream=True,
+        **options,
     ) as stream:
         if cancel_event.is_set():
             return None
@@ -356,6 +383,8 @@ def _run_agent_turn(
     inputs: History,
     send: EventSender,
     cancel_event: Event,
+    *,
+    compact_threshold: int | None = None,
 ) -> History | None:
     history = list(inputs)
 
@@ -363,7 +392,14 @@ def _run_agent_turn(
         if cancel_event.is_set():
             return None
 
-        completed = _request_response(client, model, history, send, cancel_event)
+        completed = _request_response(
+            client,
+            model,
+            history,
+            send,
+            cancel_event,
+            compact_threshold=compact_threshold,
+        )
 
         if completed is None:
             return None
@@ -435,6 +471,8 @@ def stream_chatgpt_response(
     messages: History,
     events: SimpleQueue[ReplyEvent],
     cancel_event: Event,
+    *,
+    compact_threshold: int | None = None,
 ) -> None:
     """Run on a worker thread; publish text, complete, or error queue events."""
 
@@ -502,7 +540,12 @@ def stream_chatgpt_response(
             max_retries=0,
         ) as client:
             history = _run_agent_turn(
-                _wire_client(client), model, messages, send, cancel_event
+                _wire_client(client),
+                model,
+                messages,
+                send,
+                cancel_event,
+                compact_threshold=compact_threshold,
             )
             if history is None:
                 return

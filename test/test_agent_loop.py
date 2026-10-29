@@ -112,7 +112,7 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.credentials = fixture_credentials(TOKEN)
         self.input: History = [{'role': 'user', 'content': 'Inspect the workspace.'}]
 
-    def run_stream(self, responses: Sequence[HTTPFixture], *, execute: Callable[[list[ToolCall]], list[str]] | None = None) -> list[ReplyEvent]:
+    def run_stream(self, responses: Sequence[HTTPFixture], *, execute: Callable[[list[ToolCall]], list[str]] | None = None, compact_threshold: int | None = None) -> list[ReplyEvent]:
         real_openai = openai.OpenAI
         def handler(request: httpx2.Request) -> httpx2.Response:
             self.requests.append(REQUEST_ADAPTER.validate_json(request.content))
@@ -138,7 +138,7 @@ class AgentLoopHTTPTests(unittest.TestCase):
               patch.object(Tools, 'execute', side_effect=tool_execute),
               redirect_stdout(output), redirect_stderr(output)):
             stream_chatgpt_response(self.credentials, 'selected-model', self.input,
-                                   self.events, self.cancel)
+                                   self.events, self.cancel, compact_threshold=compact_threshold)
         self.assertNotIn(TOKEN, output.getvalue())
         self.assertTrue(all(client.is_closed for client in self.clients), 'Close every SDK/HTTP client.')
         result: list[ReplyEvent] = []
@@ -159,6 +159,7 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assertEqual(request['model'], 'selected-model')
         self.assertEqual(request.get('reasoning'), {'effort': 'medium'})
         self.assertIs(request['store'], False)
+        self.assertNotIn('context_management', request)
         self.assertIn('reasoning.encrypted_content', request['include'])
         schemas = request['tools']
         self.assertEqual({item['name'] for item in schemas}, {'read', 'write', 'edit', 'bash'})
@@ -174,6 +175,19 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assertNotIn('offset', required)
         self.assertNotIn('limit', required)
         self.assertEqual(self.input, [{'role': 'user', 'content': 'Inspect the workspace.'}])
+
+    def test_compaction_threshold_is_forwarded_to_every_model_request(self) -> None:
+        events = self.run_stream([
+            [completed([call()])],
+            [delta(), completed([message()])],
+        ], compact_threshold=400000)
+
+        self.assertEqual(len(self.requests), 2)
+        for request in self.requests:
+            self.assertEqual(request.get('context_management'), [
+                {'type': 'compaction', 'compact_threshold': 400000},
+            ])
+        self.assertEqual(events[-1][0], 'complete')
 
     def test_replays_reasoning_every_output_and_matching_tool_result(self) -> None:
         outputs: list[OutputItem] = [reasoning(), message('Checking.'), call()]

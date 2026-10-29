@@ -15,6 +15,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_output_text_param import Logprob
 from openai.types.shared_params import Reasoning
+from openai.types.responses.response_create_params import ContextManagement
 from pydantic import TypeAdapter
 
 from vin.types import Credentials, History
@@ -126,6 +127,7 @@ class RequestSnapshot(TypedDict):
     store: bool
     stream: bool
     instructions: str
+    context_management: NotRequired[list[ContextManagement]]
 
 
 REQUEST_ADAPTER = TypeAdapter(RequestSnapshot)
