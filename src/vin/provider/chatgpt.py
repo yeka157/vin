@@ -143,6 +143,10 @@ def list_chatgpt_models(credentials: object) -> list[ModelMetadata]:
             if not isinstance(value, str) or not value.strip():
                 raise RuntimeError(f"Model endpoint returned an invalid {field}.")
 
+        window = model.get("context_window")
+        if type(window) is not int or window <= 0:
+            model.pop("context_window", None)
+
         models.append(cast(ModelMetadata, model))
 
     return models

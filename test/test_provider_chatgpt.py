@@ -47,7 +47,7 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.credentials = fixture_credentials("fake-access-token")
 
     def test_visible_models_keep_server_order(self) -> None:
-        first = {"slug": "model-b", "display_name": "B", "visibility": "list"}
+        first = {"slug": "model-b", "display_name": "B", "visibility": "list", "context_window": 500000}
         second = {"slug": "model-a", "display_name": "A", "visibility": "list"}
         response = io.BytesIO(
             json.dumps({"models": [first, {"visibility": "hidden"}, second]}).encode()
@@ -66,6 +66,15 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertEqual(sent.get_header("Authorization"), "Bearer fake-access-token")
         self.assertEqual(sent.get_header("Accept"), "application/json")
         self.assertEqual(request.call_args.kwargs, {"timeout": 60})
+
+    def test_unusable_context_window_does_not_block_model_discovery(self) -> None:
+        expected = {"slug": "model-a", "display_name": "A", "visibility": "list"}
+        for value in (None, True, 0, -1, "500000"):
+            with self.subTest(value=value):
+                response = io.BytesIO(json.dumps({"models": [{**expected, "context_window": value}]}).encode())
+                with patch.object(chatgpt, "urlopen", return_value=response):
+                    result = chatgpt.list_chatgpt_models(self.credentials)
+                self.assertEqual(result, [expected])
 
     def test_empty_or_hidden_catalog_returns_no_choices(self) -> None:
         for models in ([], [{"visibility": "hidden"}]):

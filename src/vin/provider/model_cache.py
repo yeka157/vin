@@ -12,7 +12,9 @@ MODEL_CACHE_DIR = Path.home() / ".cache" / "vin" / "chatgpt"
 
 
 def _cache_path(credentials: Mapping[str, object] | None) -> Path:
-    identity = [(credentials or {}).get(field) for field in ("issuer", "client_id", "subject")]
+    identity = [
+        (credentials or {}).get(field) for field in ("issuer", "client_id", "subject")
+    ]
     if any(not isinstance(value, str) or not value.strip() for value in identity):
         raise ValueError("Missing account identity")
 
@@ -32,20 +34,33 @@ def _model_metadata(models: object) -> list[ModelMetadata]:
         ):
             raise ValueError("Invalid model cache")
 
-        result.append({"slug": cast(str, model["slug"]), "display_name": cast(str, model["display_name"])})
+        metadata: ModelMetadata = {
+            "slug": cast(str, model["slug"]),
+            "display_name": cast(str, model["display_name"]),
+        }
+        window = model.get('context_window')
+        if type(window) is int and window > 0:
+            metadata['context_window'] = window
+        result.append(metadata)
 
     return result
 
 
-def load_cached_chatgpt_models(credentials: Mapping[str, object]) -> list[ModelMetadata]:
+def load_cached_chatgpt_models(
+    credentials: Mapping[str, object],
+) -> list[ModelMetadata]:
     try:
-        payload = cast(object, json.loads(_cache_path(credentials).read_text(encoding="utf-8")))
+        payload = cast(
+            object, json.loads(_cache_path(credentials).read_text(encoding="utf-8"))
+        )
         return _model_metadata(payload)
     except (OSError, ValueError):
         return []
 
 
-def save_cached_chatgpt_models(credentials: Mapping[str, object] | None, models: object) -> None:
+def save_cached_chatgpt_models(
+    credentials: Mapping[str, object] | None, models: object
+) -> None:
     try:
         metadata = _model_metadata(models)
         save_private_json(_cache_path(credentials), metadata)

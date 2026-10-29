@@ -80,6 +80,24 @@ class ChatGPTModelCacheTests(unittest.TestCase):
                     self.cache.load_cached_chatgpt_models(self.credentials), self.models
                 )
 
+    def test_context_window_survives_cache_without_using_experimental_maximum(self) -> None:
+        self.cache.save_cached_chatgpt_models(self.credentials, [{
+            "slug": "sized-model", "display_name": "Sized Model",
+            "context_window": 500000, "max_context_window": 872000,
+        }])
+
+        expected = [{"slug": "sized-model", "display_name": "Sized Model", "context_window": 500000}]
+        self.assertEqual(self.cache.load_cached_chatgpt_models(self.credentials), expected)
+        self.assertEqual(json.loads(self.cache_file().read_text()), expected)
+
+    def test_unusable_context_window_keeps_model_available_with_unknown_limit(self) -> None:
+        for value in (None, True, 0, -1, "500000"):
+            with self.subTest(value=value):
+                self.cache.save_cached_chatgpt_models(self.credentials, [{
+                    **self.models[0], "context_window": value,
+                }])
+                self.assertEqual(self.cache.load_cached_chatgpt_models(self.credentials), [self.models[0]])
+
 
     def test_corrupt_json_and_invalid_encoding_are_ignored(self) -> None:
         self.cache.save_cached_chatgpt_models(self.credentials, self.models)

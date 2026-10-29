@@ -9,14 +9,18 @@ from rich.text import Text
 
 
 type Pathish = str | PathLike[str]
-type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[
+    str, JSONValue
+]
 # Provider history deliberately preserves opaque SDK output and future provider fields.
 type ProviderItem = dict[str, JSONValue]
 type History = list[ProviderItem]
 
 
 def is_record(value: object) -> TypeIs[dict[str, object]]:
-    return isinstance(value, dict) and all(isinstance(key, str) for key in cast(dict[object, object], value))
+    return isinstance(value, dict) and all(
+        isinstance(key, str) for key in cast(dict[object, object], value)
+    )
 
 
 def is_list(value: object) -> TypeIs[list[object]]:
@@ -89,6 +93,7 @@ type AccountRecord = Credentials | Registration
 class ModelMetadata(TypedDict):
     slug: str
     display_name: str
+    context_window: NotRequired[int]
 
 
 class ModelPreference(TypedDict):
