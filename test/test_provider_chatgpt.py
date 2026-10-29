@@ -209,7 +209,7 @@ class StreamingResponseTests(unittest.TestCase):
         finally:
             self.closed.append("stream")
 
-    def invoke(self, source: Iterable[ResponseStreamEvent] = (), *, credentials: object = ..., model: object = "selected-model") -> Mock:
+    def invoke(self, source: Iterable[ResponseStreamEvent] = (), *, credentials: object = ..., model: object = "selected-model", compact_only: bool = False) -> Mock:
         self.client.responses.create.return_value = self.stream(source)
         if credentials is ...:
             credentials = self.credentials
@@ -219,7 +219,8 @@ class StreamingResponseTests(unittest.TestCase):
             redirect_stdout(output), redirect_stderr(output),
         ):
             chatgpt.stream_chatgpt_response(
-                credentials, model, self.messages, self.events, self.cancel
+                credentials, model, self.messages, self.events, self.cancel,
+                compact_only=compact_only,
             )
         self.assertEqual(output.getvalue(), "")
         return constructor
@@ -444,8 +445,8 @@ class StreamingResponseTests(unittest.TestCase):
         self.assertEqual(self.closed, ["stream", "client"])
 
     def test_cancellation_discards_late_text_completion_and_error(self) -> None:
-        for late_error in (False, True):
-            with self.subTest(late_error=late_error):
+        for compact_only, late_error in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(compact_only=compact_only, late_error=late_error):
                 self.cancel.clear()
                 self.closed.clear()
 
@@ -457,8 +458,8 @@ class StreamingResponseTests(unittest.TestCase):
                     yield self.delta("late")
                     yield self.lifecycle()
 
-                self.invoke(source())
-                self.assertEqual(self.drain(), [("text", "partial")])
+                self.invoke(source(), compact_only=compact_only)
+                self.assertEqual(self.drain(), [] if compact_only else [("text", "partial")])
                 self.assertEqual(self.closed, ["stream", "client"])
 
     def test_cleanup_failure_cannot_publish_a_success(self) -> None:

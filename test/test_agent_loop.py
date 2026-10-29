@@ -71,6 +71,10 @@ def reasoning() -> ResponseReasoningItemParam:
             'encrypted_content': 'encrypted-reasoning-test'}
 
 
+def compaction() -> ResponseCompactionItemParamParam:
+    return {'type': 'compaction', 'id': 'cmp_manual', 'encrypted_content': 'fake-opaque-context'}
+
+
 def message(text: str = 'Done', refusal: bool = False) -> ResponseOutputMessageParam:
     content: ResponseOutputRefusalParam | ResponseOutputTextParam = ({'type': 'refusal', 'refusal': text} if refusal else
                {'type': 'output_text', 'text': text, 'annotations': [], 'logprobs': []})
@@ -112,7 +116,7 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.credentials = fixture_credentials(TOKEN)
         self.input: History = [{'role': 'user', 'content': 'Inspect the workspace.'}]
 
-    def run_stream(self, responses: Sequence[HTTPFixture], *, execute: Callable[[list[ToolCall]], list[str]] | None = None, compact_threshold: int | None = None) -> list[ReplyEvent]:
+    def run_stream(self, responses: Sequence[HTTPFixture], *, execute: Callable[[list[ToolCall]], list[str]] | None = None, compact_threshold: int | None = None, compact_only: bool = False) -> list[ReplyEvent]:
         real_openai = openai.OpenAI
         def handler(request: httpx2.Request) -> httpx2.Response:
             self.requests.append(REQUEST_ADAPTER.validate_json(request.content))
@@ -138,7 +142,8 @@ class AgentLoopHTTPTests(unittest.TestCase):
               patch.object(Tools, 'execute', side_effect=tool_execute),
               redirect_stdout(output), redirect_stderr(output)):
             stream_chatgpt_response(self.credentials, 'selected-model', self.input,
-                                   self.events, self.cancel, compact_threshold=compact_threshold)
+                                   self.events, self.cancel, compact_threshold=compact_threshold,
+                                   compact_only=compact_only)
         self.assertNotIn(TOKEN, output.getvalue())
         self.assertTrue(all(client.is_closed for client in self.clients), 'Close every SDK/HTTP client.')
         result: list[ReplyEvent] = []
@@ -188,6 +193,67 @@ class AgentLoopHTTPTests(unittest.TestCase):
                 {'type': 'compaction', 'compact_threshold': 400000},
             ])
         self.assertEqual(events[-1][0], 'complete')
+
+    def test_manual_mode_omits_tool_schemas_and_preserves_supplied_input(self) -> None:
+        original = deepcopy(self.input)
+        self.run_stream([[delta(), completed([message()])]], compact_threshold=1024, compact_only=True)
+
+        request, = self.requests
+        self.assertEqual(request['tools'], [])
+        self.assertEqual(request['input'], original)
+        self.assertEqual(request.get('context_management'), [
+            {'type': 'compaction', 'compact_threshold': 1024},
+        ])
+        self.assertEqual(self.executions, [])
+        self.assertEqual(self.input, original)
+
+    def test_manual_checkpoint_can_complete_without_assistant_text(self) -> None:
+        checkpoint = compaction()
+        original = deepcopy(self.input)
+        events = self.run_stream([[item_done(checkpoint), completed([])]],
+                                 compact_threshold=1024, compact_only=True)
+
+        self.assertEqual(events, [('complete', [checkpoint])])
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.executions, [])
+        self.assertEqual(self.input, original)
+
+    def test_manual_checkpoint_keeps_native_output_without_publishing_maintenance_text(self) -> None:
+        checkpoint = compaction()
+        events = self.run_stream([
+            [item_done(checkpoint), delta('Maintenance'), item_done(message('Maintenance'), 1), completed([])],
+        ], compact_threshold=1024, compact_only=True)
+
+        self.assertEqual([event[0] for event in events], ['complete'])
+        context = events[0][1]
+        assert isinstance(context, list)
+        self.assertEqual(context[0], checkpoint)
+        self.assert_subset(message('Maintenance'), context[1])
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.executions, [])
+
+    def test_manual_response_without_checkpoint_is_a_quiet_noop(self) -> None:
+        original = deepcopy(self.input)
+        events = self.run_stream([[delta('Maintenance'), completed([message('Maintenance')])]],
+                                 compact_threshold=1024, compact_only=True)
+
+        self.assertEqual(events, [('complete', None)])
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.executions, [])
+        self.assertEqual(self.input, original)
+
+    def test_manual_unexpected_tool_call_fails_without_execution_or_continuation(self) -> None:
+        original = deepcopy(self.input)
+        events = self.run_stream([
+            [completed([compaction(), call('write', '{"path":"f","content":"unexpected"}')])],
+            [delta(), completed([message()])],
+        ], compact_threshold=1024, compact_only=True)
+
+        self.assertEqual(self.executions, [])
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual([event[0] for event in events], ['error'])
+        self.assertFalse(self.events.tools_used.is_set())
+        self.assertEqual(self.input, original)
 
     def test_replays_reasoning_every_output_and_matching_tool_result(self) -> None:
         outputs: list[OutputItem] = [reasoning(), message('Checking.'), call()]

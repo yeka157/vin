@@ -86,6 +86,13 @@ class _AgentError(RuntimeError):
     pass
 
 
+COMPACTION_PROMPT = (
+    "Compact the supplied conversation for later continuation. "
+    "Preserve its goal, constraints, decisions, and unfinished work. "
+    "Do not continue the task or call tools."
+)
+
+
 SYSTEM_PROMPT = (
     "You are Vin, a concise coding assistant. "
     "Use read to inspect UTF-8 files, write to create or overwrite files, "
@@ -255,6 +262,7 @@ def _request_response(
     cancel_event: Event,
     *,
     compact_threshold: int | None = None,
+    compact_only: bool = False,
 ) -> tuple["Response", bool] | None:
     from vin.tools import _response_tools
 
@@ -277,8 +285,8 @@ def _request_response(
     with client.responses.create(
         model=model,
         input=inputs,
-        instructions=SYSTEM_PROMPT,
-        tools=_response_tools(),
+        instructions=COMPACTION_PROMPT if compact_only else SYSTEM_PROMPT,
+        tools=[] if compact_only else _response_tools(),
         reasoning={"effort": "medium"},
         include=["reasoning.encrypted_content"],
         store=False,
@@ -385,6 +393,7 @@ def _run_agent_turn(
     cancel_event: Event,
     *,
     compact_threshold: int | None = None,
+    compact_only: bool = False,
 ) -> History | None:
     history = list(inputs)
 
@@ -399,6 +408,7 @@ def _run_agent_turn(
             send,
             cancel_event,
             compact_threshold=compact_threshold,
+            compact_only=compact_only,
         )
 
         if completed is None:
@@ -407,6 +417,9 @@ def _run_agent_turn(
         response, has_text = completed
 
         calls = [item for item in response.output if item.type == "function_call"]
+
+        if compact_only and calls:
+            raise _AgentError("Compaction returned unexpected tool calls.")
 
         if len(calls) > 8:
             raise _AgentError("Tool call limit exceeded: maximum 8.")
@@ -420,8 +433,13 @@ def _run_agent_turn(
                 raise _AgentError("ChatGPT returned invalid response output.")
             history.append(dumped)
 
-        if any(item.type == "compaction" for item in response.output):
+        has_compaction = any(item.type == "compaction" for item in response.output)
+
+        if has_compaction:
             history = context_after_compaction(history)
+
+        if compact_only:
+            return history if has_compaction else None
 
         if not calls:
             if not has_text:
@@ -473,6 +491,7 @@ def stream_chatgpt_response(
     cancel_event: Event,
     *,
     compact_threshold: int | None = None,
+    compact_only: bool = False,
 ) -> None:
     """Run on a worker thread; publish text, complete, or error queue events."""
 
@@ -493,6 +512,8 @@ def stream_chatgpt_response(
             if isinstance(marker, SetMarker):
                 marker.set()
         if cancel_event.is_set():
+            return
+        if compact_only and kind == "text":
             return
         if kind in ("text", "tool_diff", "error", "rate_limit") and isinstance(
             value, str
@@ -529,7 +550,8 @@ def stream_chatgpt_response(
     import openai
 
     outcome: (
-        tuple[Literal["error", "rate_limit"], str] | tuple[Literal["complete"], History]
+        tuple[Literal["error", "rate_limit"], str]
+        | tuple[Literal["complete"], History | None]
     ) = ("error", "ChatGPT stream ended before completion.")
 
     try:
@@ -546,8 +568,9 @@ def stream_chatgpt_response(
                 send,
                 cancel_event,
                 compact_threshold=compact_threshold,
+                compact_only=compact_only,
             )
-            if history is None:
+            if history is None and not compact_only:
                 return
             outcome = ("complete", history)
     except openai.APITimeoutError:
