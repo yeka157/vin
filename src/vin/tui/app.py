@@ -602,6 +602,7 @@ class VinApp:
 
         save_model_preference(self.selected_provider, new_model)
         self.selected_model = new_model
+        self.last_usage = None
         model_name = model_display_name(self.models, self.selected_model)
         return f"Model: {provider_name} · {model_name}"
 
@@ -668,6 +669,7 @@ class VinApp:
                 self.models = []
                 self.selected_provider = None
                 self.selected_model = None
+                self.last_usage = None
             self.auth_status = None
             self.app.invalidate()
 

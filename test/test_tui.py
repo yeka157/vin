@@ -27,7 +27,7 @@ from typing import Literal, TypedDict, cast
 from rich.console import RenderableType
 from vin.types import Credentials, History, ModelMetadata, TranscriptEntry
 from vin.sessions.transcript import decode_transcript
-from vin.provider.events import ReplyEvents
+from vin.provider.events import ReplyEvents, TokenUsage
 from prompt_toolkit.layout.controls import UIContent
 from session_typing_helpers import present, text_value, validated_transcript
 from tui_typing_helpers import key_event
@@ -533,6 +533,37 @@ class InitialModelTests(unittest.TestCase):
         self.assertEqual(self.app.models, [self.models[0]])
         self.assertEqual(self.app.selected_model, "old-model")
         self.assertEqual(self.app.selected_provider, "chatgpt")
+
+    def test_usage_changes_only_after_a_different_model_is_saved(self) -> None:
+        usage: TokenUsage = {
+            "input_tokens": 1200, "output_tokens": 100, "total_tokens": 1300,
+        }
+        self.app.last_usage = usage.copy()
+
+        self.inline.side_effect = asyncio.CancelledError
+        self.assertIsNone(asyncio.run(self.app.change_model()))
+        self.assertEqual(self.app.last_usage, usage)
+        self.assertEqual(self.app.selected_model, "old-model")
+        self.save.assert_not_called()
+
+        self.inline.side_effect = None
+        self.inline.return_value = "old-model"
+        self.assertIsNone(asyncio.run(self.app.change_model()))
+        self.assertEqual(self.app.last_usage, usage)
+        self.save.assert_not_called()
+
+        self.inline.return_value = "new-model"
+        self.save.side_effect = OSError("Could not save preference")
+        with self.assertRaisesRegex(OSError, "Could not save preference"):
+            asyncio.run(self.app.change_model())
+        self.assertEqual(self.app.last_usage, usage)
+        self.assertEqual(self.app.selected_model, "old-model")
+
+        self.save.side_effect = None
+        self.app.models = self.models
+        self.assertEqual(asyncio.run(self.app.change_model()), "Model: ChatGPT · New Model")
+        self.assertEqual(self.app.selected_model, "new-model")
+        self.assertIsNone(self.app.last_usage)
 
 
 class ModelCommandTests(unittest.TestCase):
@@ -1254,6 +1285,9 @@ class ModelCommandTests(unittest.TestCase):
             step += 1
             if step == 1:
                 context["loop"] = asyncio.get_running_loop()
+                self.vin_app.last_usage = {
+                    "input_tokens": 1200, "output_tokens": 100, "total_tokens": 1300,
+                }
                 return "/logout"
             buffer = self.session.default_buffer
             self.assertEqual((buffer.text, buffer.cursor_position), ("nextx draft", 5))
@@ -1270,6 +1304,7 @@ class ModelCommandTests(unittest.TestCase):
         self.assertEqual(self.vin_app.credentials, registration)
         self.assertEqual(self.vin_app.models, [])
         self.assertIsNone(self.vin_app.selected_model)
+        self.assertIsNone(self.vin_app.last_usage)
         self.assertEqual(
             [str(entry["content"]) for entry in self.vin_app.transcript[1:]],
             [warning, "Signed out of Vin."],
