@@ -376,6 +376,14 @@ class VinApp:
                 )
                 return "error"
 
+            compact_threshold: int | None = None
+            for model in self.models:
+                if model["slug"] == self.selected_model:
+                    window = model.get("context_window")
+                    if window is not None:
+                        compact_threshold = window * 4 // 5
+                    break
+
             Thread(
                 target=stream_chatgpt_response,
                 args=(
@@ -384,6 +392,11 @@ class VinApp:
                     request,
                     events,
                     cancel_event,
+                ),
+                kwargs=(
+                    {"compact_threshold": compact_threshold}
+                    if compact_threshold is not None
+                    else {}
                 ),
                 daemon=True,
             ).start()

@@ -22,7 +22,7 @@ from rich.text import Text
 from vin.sessions import storage
 from vin.sessions.records import new_session, snapshot_session
 from vin.tui import app, conversations
-from vin.types import Credentials, History, SessionRecord
+from vin.types import Credentials, History, ModelMetadata, SessionRecord
 from vin.provider.events import ReplyEvent, ReplyEvents, TokenUsage
 from session_typing_helpers import list_value, present, record_value, string_value, text_value
 
@@ -382,6 +382,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
 
     def prepare_conversation(self) -> None:
         self.owner = app.VinApp()
+        self.request_thresholds: list[int | None] = []
         self.owner.project_dir = self.project
         buffer = Buffer()
         buffer.text = "next draft"
@@ -400,7 +401,8 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.session_id = present(self.owner.session_record)["id"]
 
     async def run_turn(self, emitted: Sequence[ReplyEvent]) -> Literal["error", "rate_limit"] | None:
-        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event) -> None:
+        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None) -> None:
+            self.request_thresholds.append(compact_threshold)
             if any(kind == "tool_started" for kind, _ in emitted):
                 events.tools_used.set()
             for event in emitted:
@@ -413,6 +415,24 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
 
     def saved(self) -> SessionRecord:
         return present(storage.load_session(self.project, self.session_id))
+
+    async def test_request_threshold_uses_only_selected_models_known_context_window(self) -> None:
+        cases: list[tuple[list[ModelMetadata], int | None]] = [
+            ([
+                {"slug": "other", "display_name": "Other", "context_window": 1000000},
+                {"slug": "chosen", "display_name": "Chosen", "context_window": 500000},
+            ], 400000),
+            ([{"slug": "chosen", "display_name": "Chosen"}], None),
+            ([{"slug": "other", "display_name": "Other", "context_window": 500000}], None),
+            ([], None),
+        ]
+        for models, expected in cases:
+            with self.subTest(models=models):
+                self.prepare_conversation()
+                self.owner.models = models
+                self.owner.selected_model = "chosen"
+                self.assertIsNone(await self.run_turn([("text", "Done"), ("complete", None)]))
+                self.assertEqual(self.request_thresholds, [expected])
 
     async def test_latest_response_usage_is_retained_without_changing_conversation(self) -> None:
         self.assertIsNone(self.owner.last_usage)
