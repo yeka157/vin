@@ -7,7 +7,7 @@ from threading import Event, Thread
 from time import monotonic
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 from collections.abc import Sequence
 
 from prompt_toolkit import Application, PromptSession
@@ -174,6 +174,11 @@ def get_chatgpt_model_preference(
         }
     )
     return None
+
+
+class ReplyOptions(TypedDict, total=False):
+    compact_threshold: int
+    compact_only: bool
 
 
 class VinApp:
@@ -350,12 +355,15 @@ class VinApp:
             self.submitted.put_nowait(None)
         return False
 
-    async def stream_reply(self, text: str) -> Literal["error", "rate_limit"] | None:
+    async def stream_reply(
+        self, text: str, *, compact_only: bool = False
+    ) -> Literal["error", "rate_limit"] | None:
         events = ReplyEvents()
         cancel_event = Event()
         entry: AssistantEntry = {"role": "assistant", "content": "", "streaming": True}
         request = [message.copy() for message in self.messages]
-        request.append({"role": "user", "content": text})
+        if not compact_only:
+            request.append({"role": "user", "content": text})
         self.reply_entry = entry
         self.request_started_at = monotonic()
         self.last_request_duration = None
@@ -365,6 +373,12 @@ class VinApp:
         self.tool_status = None
 
         try:
+            if compact_only and not request:
+                self.transcript.append(
+                    {"role": "notice", "content": "No conversation context to compact."}
+                )
+                completed = True
+                return
             try:
                 credentials = await self.prepare_request_credentials()
             except Exception as error:
@@ -384,6 +398,9 @@ class VinApp:
                         compact_threshold = window * 4 // 5
                     break
 
+            if compact_only:
+                compact_threshold = 1024
+
             if compact_threshold is None and self.selected_model is not None:
                 notice = (
                     "Automatic compaction is off because this model's "
@@ -395,6 +412,12 @@ class VinApp:
                 ):
                     self.transcript.append({"role": "notice", "content": notice})
 
+            options: ReplyOptions = {}
+            if compact_threshold is not None:
+                options["compact_threshold"] = compact_threshold
+            if compact_only:
+                options["compact_only"] = True
+
             Thread(
                 target=stream_chatgpt_response,
                 args=(
@@ -404,11 +427,7 @@ class VinApp:
                     events,
                     cancel_event,
                 ),
-                kwargs=(
-                    {"compact_threshold": compact_threshold}
-                    if compact_threshold is not None
-                    else {}
-                ),
+                kwargs=options,
                 daemon=True,
             ).start()
 
@@ -472,7 +491,11 @@ class VinApp:
                 elif event[0] == "complete":
                     value = event[1]
                     entry["streaming"] = False
-                    if value is None:
+                    if value is None and compact_only:
+                        self.transcript.append(
+                            {"role": "notice", "content": "Nothing to compact yet."}
+                        )
+                    elif value is None:
                         self.messages.extend(
                             [
                                 {"role": "user", "content": text},

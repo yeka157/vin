@@ -10,7 +10,7 @@ from queue import Empty, SimpleQueue
 from tempfile import TemporaryDirectory
 from threading import Event
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.buffer import Buffer
@@ -383,6 +383,8 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
     def prepare_conversation(self) -> None:
         self.owner = app.VinApp()
         self.request_thresholds: list[int | None] = []
+        self.request_modes: list[bool] = []
+        self.request_contexts: list[History] = []
         self.owner.project_dir = self.project
         buffer = Buffer()
         buffer.text = "next draft"
@@ -400,21 +402,129 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.owner.checkpoint_session(force=True))
         self.session_id = present(self.owner.session_record)["id"]
 
-    async def run_turn(self, emitted: Sequence[ReplyEvent]) -> Literal["error", "rate_limit"] | None:
-        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None) -> None:
+    async def run_turn(self, emitted: Sequence[ReplyEvent], *, compact_only: bool = False) -> Literal["error", "rate_limit"] | None:
+        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None, compact_only: bool = False) -> None:
             self.request_thresholds.append(compact_threshold)
+            self.request_modes.append(compact_only)
+            self.request_contexts.append(deepcopy(request))
             if any(kind == "tool_started" for kind, _ in emitted):
                 events.tools_used.set()
             for event in emitted:
                 events.put(event)
 
         with patch.object(app, "stream_chatgpt_response", side_effect=worker):
-            task = asyncio.create_task(self.owner.stream_reply(self.prompt))
+            task = asyncio.create_task(self.owner.stream_reply(self.prompt, compact_only=compact_only))
             self.owner.pending_reply = task
             return await asyncio.wait_for(task, timeout=2)
 
     def saved(self) -> SessionRecord:
         return present(storage.load_session(self.project, self.session_id))
+
+    async def test_manual_mode_sends_only_existing_context_with_explicit_threshold(self) -> None:
+        for window in (None, 500000):
+            with self.subTest(window=window):
+                self.prepare_conversation()
+                model: ModelMetadata = {"slug": "chosen", "display_name": "Chosen"}
+                if window is not None:
+                    model["context_window"] = window
+                self.owner.models = [model]
+                self.owner.selected_model = "chosen"
+                before = deepcopy(self.owner.transcript)
+                context: History = [{"type": "compaction", "id": "cmp_manual", "encrypted_content": "fake-context"}]
+
+                self.assertIsNone(await self.run_turn([("complete", context)], compact_only=True))
+
+                self.assertEqual(self.request_contexts, [self.previous])
+                self.assertEqual(self.request_modes, [True])
+                self.assertEqual(self.request_thresholds, [1024])
+                self.assertEqual(self.saved()["messages"], context)
+                self.assertEqual(self.owner.transcript[:len(before)], before)
+                self.assertFalse(any(row["role"] == "assistant" for row in self.owner.transcript))
+                self.assertFalse(any(isinstance(row["content"], str) and row["content"].startswith("Automatic compaction")
+                                     for row in self.owner.transcript))
+
+    async def test_manual_noop_preserves_context_and_session_without_fabricated_reply(self) -> None:
+        self.assertIsNone(await self.run_turn([("complete", None)], compact_only=True))
+
+        self.assertEqual(self.owner.messages, self.previous)
+        self.assertEqual(self.saved()["messages"], self.previous)
+        self.assertEqual(self.saved()["id"], self.session_id)
+        self.assertEqual(sum(row["role"] == "notice" and row["content"] == "Nothing to compact yet."
+                             for row in self.owner.transcript), 1)
+        self.assertFalse(any(row["role"] == "assistant" for row in self.owner.transcript))
+
+    async def test_empty_manual_context_skips_credentials_worker_and_session_creation(self) -> None:
+        self.owner.messages = []
+        self.owner.transcript = []
+        self.owner.session_record = None
+        self.owner.saved_session_record = None
+        self.owner.active_turn = None
+        refresh = AsyncMock(side_effect=AssertionError("Empty compaction must not access credentials"))
+
+        with patch.object(self.owner, "prepare_request_credentials", refresh):
+            self.assertIsNone(await self.run_turn([("complete", None)], compact_only=True))
+
+        refresh.assert_not_awaited()
+        self.assertEqual(self.request_contexts, [])
+        self.assertEqual(self.owner.messages, [])
+        self.assertIsNone(self.owner.session_record)
+        self.assertIsNone(self.owner.pending_reply)
+        self.assertTrue(any(row["role"] == "notice" and row["content"] == "No conversation context to compact."
+                            for row in self.owner.transcript))
+
+    async def test_manual_failure_preserves_context_without_success_or_noop_notice(self) -> None:
+        self.assertEqual(await self.run_turn([("error", "Compaction failed.")], compact_only=True), "error")
+
+        self.assertEqual(self.owner.messages, self.previous)
+        self.assertEqual(self.saved()["messages"], self.previous)
+        self.assertEqual(self.saved()["id"], self.session_id)
+        self.assertEqual(self.request_modes, [True])
+        self.assertFalse(any(row["role"] == "notice" and row["content"] in ("Conversation compacted.", "Nothing to compact yet.")
+                             for row in self.owner.transcript))
+        self.assertFalse(any(row["role"] == "assistant" for row in self.owner.transcript))
+
+    async def test_cancelled_manual_turn_ignores_late_checkpoint_and_preserves_queue(self) -> None:
+        entered, stopped = Event(), Event()
+        self.owner.queued_prompts.append("Next request")
+        context: History = [{"type": "compaction", "id": "cmp_late", "encrypted_content": "fake-late-context"}]
+
+        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None, compact_only: bool = False) -> None:
+            self.request_contexts.append(deepcopy(request))
+            self.request_modes.append(compact_only)
+            try:
+                entered.set()
+                cancel_event.wait(2)
+                events.put(("complete", context))
+            finally:
+                stopped.set()
+
+        with patch.object(app, "stream_chatgpt_response", side_effect=worker):
+            task = asyncio.create_task(self.owner.stream_reply(self.prompt, compact_only=True))
+            self.owner.pending_reply = task
+            try:
+                async with asyncio.timeout(2):
+                    while not entered.is_set():
+                        await asyncio.sleep(0.001)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                async with asyncio.timeout(2):
+                    while not stopped.is_set():
+                        await asyncio.sleep(0.001)
+
+        self.assertEqual(self.owner.messages, self.previous)
+        self.assertEqual(self.saved()["messages"], self.previous)
+        self.assertEqual(self.request_contexts, [self.previous])
+        self.assertEqual(self.request_modes, [True])
+        self.assertEqual(list(self.owner.queued_prompts), ["Next request"])
+        self.assertEqual(self.owner.session.default_buffer.document, self.draft)
+        self.assertIsNone(self.owner.pending_reply)
+        self.assertFalse(any(row["role"] == "notice" and row["content"] == "Conversation compacted."
+                             for row in self.owner.transcript))
 
     async def test_request_threshold_uses_only_selected_models_known_context_window(self) -> None:
         cases: list[tuple[list[ModelMetadata], int | None]] = [
