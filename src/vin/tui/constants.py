@@ -12,6 +12,7 @@ COMMANDS = {
     "/logout",
     "/quit",
     "/exit",
+    "/compact",
 }
 
 

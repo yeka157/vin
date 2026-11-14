@@ -110,3 +110,41 @@ class SessionCompletionKeyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.buffer.text, "/model")
         self.assertTrue(self.owner.submitted.empty())
+
+    async def test_busy_compact_is_rejected_with_a_notice_and_leaves_the_queue(self) -> None:
+        async def hold() -> None:
+            await asyncio.Event().wait()
+
+        for state in ("replying", "queued"):
+            with self.subTest(state=state):
+                self.owner.transcript.clear()
+                self.owner.queued_prompts.clear()
+                self.owner.queued_prompts.append("Next request")
+                task = asyncio.create_task(hold()) if state == "replying" else None
+                self.owner.pending_reply = task
+                self.buffer.document = Document("/compact")
+                try:
+                    self.press(Keys.ControlM)
+                    self.press(Keys.ControlM)
+                finally:
+                    self.owner.pending_reply = None
+                    if task is not None:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+
+                self.assertTrue(self.owner.submitted.empty())
+                self.assertEqual(list(self.owner.queued_prompts), ["Next request"])
+                self.assertEqual(self.buffer.text, "/compact")
+                self.assertEqual(
+                    [row["content"] for row in self.owner.transcript],
+                    ["Finish or cancel the current work before compacting."],
+                )
+
+    async def test_idle_compact_is_submitted_without_a_notice(self) -> None:
+        self.buffer.document = Document("/compact")
+
+        self.press(Keys.ControlM)
+
+        self.assertEqual(self.owner.submitted.get_nowait(), "/compact")
+        self.assertEqual(self.owner.transcript, [])
+        self.assertEqual(self.buffer.text, "")

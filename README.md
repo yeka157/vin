@@ -87,6 +87,7 @@ Vin shows its progress and tool activity as it works. Completed tool groups coll
 | `/resume` | Choose a saved conversation for the current project folder |
 | `/resume <title-or-id>` | Resume a conversation by its exact title or full session ID |
 | `/rename <name>` | Rename the current conversation |
+| `/compact` | Compact the conversation context while Vin is idle |
 | `/exit` or `/quit` | Exit Vin |
 
 ## Keyboard and navigation

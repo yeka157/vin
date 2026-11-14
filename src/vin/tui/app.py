@@ -577,17 +577,18 @@ class VinApp:
                 assert self.request_started_at is not None
                 self.last_request_duration = monotonic() - self.request_started_at
                 if completed:
-                    finished_at = datetime.now().astimezone().strftime("%I:%M %p")
-                    self.transcript.append(
-                        {
-                            "role": "notice",
-                            "content": Text(
-                                f"* Worked for {format_duration(self.last_request_duration)}"
-                                f" · done {finished_at}",
-                                style="dim",
-                            ),
-                        }
-                    )
+                    if not compact_only:
+                        finished_at = datetime.now().astimezone().strftime("%I:%M %p")
+                        self.transcript.append(
+                            {
+                                "role": "notice",
+                                "content": Text(
+                                    f"* Worked for {format_duration(self.last_request_duration)}"
+                                    f" · done {finished_at}",
+                                    style="dim",
+                                ),
+                            }
+                        )
                 else:
                     interrupted = _task_is_cancelling()
                     label = "Interrupted" if interrupted else "Failed"
@@ -822,6 +823,19 @@ class VinApp:
                                 self.transcript.append(
                                     {"role": "notice", "content": outcome}
                                 )
+                        elif text == "/compact":
+                            self.reply_entry = None
+                            self.pending_reply = asyncio.create_task(
+                                self.stream_reply("", compact_only=True)
+                            )
+                            self.app.invalidate()
+                            try:
+                                result = await self.pending_reply
+                                if result == "rate_limit":
+                                    self.queue_paused = True
+                            except asyncio.CancelledError:
+                                if _task_is_cancelling():
+                                    raise
                         else:
                             content = self.handle_command(text)
                             if content is not None:
@@ -909,6 +923,7 @@ class VinApp:
                 "- `/resume [title-or-id]` - Resume a saved conversation\n"
                 "- `/rename <name>` - Rename the current conversation\n"
                 "- `/model` - Set the AI model\n"
+                "- `/compact` - Compact the conversation context\n"
                 "- `/login` - Sign in with ChatGPT Subscription\n"
                 "- `/logout` - Sign out\n"
                 "- `/quit` or `/exit` - leave Vin"

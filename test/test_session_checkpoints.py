@@ -367,6 +367,25 @@ class SessionPromptCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["id"] for item in storage.list_sessions(self.project)], [record["id"]])
 
 
+    async def test_compact_command_starts_a_manual_turn_without_a_prompt_or_session(self) -> None:
+        calls: list[tuple[str, bool]] = []
+
+        async def reply(text: str, *, compact_only: bool = False) -> None:
+            calls.append((text, compact_only))
+            self.assertIsNone(self.owner.active_turn)
+            self.owner.pending_reply = None
+
+        result = await self.run_prompts(["/compact", "/quit"], reply)
+
+        self.assertEqual(result, "/quit")
+        self.assertEqual(calls, [("", True)])
+        self.assertEqual(self.owner.messages, [])
+        self.assertEqual(self.owner.transcript, [])
+        self.assertIsNone(self.owner.session_record)
+        self.assertFalse(self.owner.queue_paused)
+        self.assertEqual(storage.list_sessions(self.project), [])
+
+
 class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         temporary = TemporaryDirectory()

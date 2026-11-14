@@ -62,6 +62,7 @@ def build_workspace(app: "VinApp") -> None:
                     "/model",
                     "/resume",
                     "/rename",
+                    "/compact",
                 ],
                 meta_dict={
                     "/help": "Show commands",
@@ -70,6 +71,7 @@ def build_workspace(app: "VinApp") -> None:
                     "/resume": "Resume a saved conversation",
                     "/rename": "Rename the current conversation",
                     "/user": "Show current account",
+                    "/compact": "Compact the conversation context",
                     "/login": "Sign in with ChatGPT Subscriptions",
                     "/logout": "Sign out",
                     "/exit": "Exit Vin",

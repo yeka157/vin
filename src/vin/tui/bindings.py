@@ -11,6 +11,7 @@ from rich.text import Text
 
 from vin.tui.constants import is_command
 from vin.tui.transcript import format_duration
+from vin.types import TranscriptEntry
 
 if TYPE_CHECKING:
     from vin.tui.app import VinApp
@@ -59,6 +60,12 @@ def create_bindings(app: "VinApp") -> KeyBindings:
 
     @bindings.add("enter", eager=True)
     def submit(event: KeyPressEvent) -> None:
+        text = event.current_buffer.text
+        idle = (
+            app.pending_reply is None
+            and app.submitted.empty()
+            and (app.queue_paused or not app.queued_prompts)
+        )
         if app.choice_future is not None:
             if not app.choice_future.done():
                 if app.choices is not None:
@@ -70,15 +77,17 @@ def create_bindings(app: "VinApp") -> KeyBindings:
                 app.choice_future.set_result(
                     app.choices.current_value if app.choices is not None else None
                 )
-        elif not app.loading_model and (
-            not is_command(event.current_buffer.text)
-            or (
-                app.pending_reply is None
-                and app.submitted.empty()
-                and (app.queue_paused or not app.queued_prompts)
-            )
-        ):
-            event.current_buffer.validate_and_handle()
+        elif not app.loading_model:
+            if text == "/compact" and not idle:
+                notice: TranscriptEntry = {
+                    "role": "notice",
+                    "content": "Finish or cancel the current work before compacting.",
+                }
+                if app.transcript[-1:] != [notice]:
+                    app.transcript.append(notice)
+                event.app.invalidate()
+            elif not is_command(text) or idle:
+                event.current_buffer.validate_and_handle()
 
     @bindings.add(
         "escape",
