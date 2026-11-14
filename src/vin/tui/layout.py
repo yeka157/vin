@@ -6,7 +6,13 @@ from typing import TYPE_CHECKING
 from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.filters import Always, Condition
-from prompt_toolkit.layout import Container, ConditionalContainer, DynamicContainer, HSplit, Window
+from prompt_toolkit.layout import (
+    Container,
+    ConditionalContainer,
+    DynamicContainer,
+    HSplit,
+    Window,
+)
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
