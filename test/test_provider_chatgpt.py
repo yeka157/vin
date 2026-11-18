@@ -256,12 +256,12 @@ class StreamingResponseTests(unittest.TestCase):
             api_key="fake-access-token", base_url="https://api.openai.com/v1",
             timeout=60, max_retries=0,
         )
-        from vin.tools import _response_tools
+        from vin.tools import response_tools
         self.client.responses.create.assert_called_once()
         self.assertEqual(submitted, {
             "model": "selected-model", "input": original,
             "instructions": chatgpt.SYSTEM_PROMPT,
-            "tools": _response_tools(), "reasoning": {"effort": "medium"},
+            "tools": response_tools(), "reasoning": {"effort": "medium"},
             "include": ["reasoning.encrypted_content"],
             "store": False, "stream": True,
         })

@@ -1,4 +1,18 @@
-__all__ = ["LAUNCH_DIR", "MAX_FILE_BYTES", "MAX_OUTPUT_CHARS", "FILE_MUTATION_LOCK", "TOOL_REGISTRY", "read", "write", "edit", "bash", "_tool_cancellation", "_response_tools", "_check_cancelled", "_truncate_output"]
+__all__ = [
+    "LAUNCH_DIR",
+    "MAX_FILE_BYTES",
+    "MAX_OUTPUT_CHARS",
+    "FILE_MUTATION_LOCK",
+    "TOOL_REGISTRY",
+    "read",
+    "write",
+    "edit",
+    "bash",
+    "tool_cancellation",
+    "response_tools",
+    "check_cancelled",
+    "truncate_output",
+]
 
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -28,7 +42,7 @@ _TOOL_CANCEL_EVENT: ContextVar[Event | None] = ContextVar(
 
 
 @contextmanager
-def _tool_cancellation(cancel_event: Event) -> Generator[None]:
+def tool_cancellation(cancel_event: Event) -> Generator[None]:
     token = _TOOL_CANCEL_EVENT.set(cancel_event)
 
     try:
@@ -37,7 +51,7 @@ def _tool_cancellation(cancel_event: Event) -> Generator[None]:
         _TOOL_CANCEL_EVENT.reset(token)
 
 
-def _check_cancelled() -> None:
+def check_cancelled() -> None:
     cancel_event = _TOOL_CANCEL_EVENT.get()
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("Tool execution cancelled.")
@@ -52,7 +66,7 @@ def _resolve_path(path: str) -> Path:
     return resolved
 
 
-def _truncate_output(text: str) -> str:
+def truncate_output(text: str) -> str:
     if len(text) <= MAX_OUTPUT_CHARS:
         return text
 
@@ -85,7 +99,7 @@ def read(path: str, offset: int = 1, limit: int = 200) -> str:
         f"{number}: {line}" for number, line in enumerate(selected, start=offset)
     )
 
-    return _truncate_output(output)
+    return truncate_output(output)
 
 
 def _atomic_write(
@@ -313,7 +327,7 @@ def edit(path: str, old_text: str, new_text: str) -> str:
             expected=(data, metadata),
         )
 
-        return _truncate_output(diff)
+        return truncate_output(diff)
 
 
 def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
@@ -330,7 +344,7 @@ def bash(command: str, timeout: int = 30) -> str:
     if not 1 <= timeout <= 300:
         raise ValueError("Timeout must be between 1 and 300 seconds.")
 
-    _check_cancelled()
+    check_cancelled()
 
     environment = os.environ.copy()
     environment.pop("BASH_ENV", None)
@@ -358,7 +372,7 @@ def bash(command: str, timeout: int = 30) -> str:
             selector.register(process.stdout, selectors.EVENT_READ)
 
             while selector.get_map() or process.poll() is None:
-                _check_cancelled()
+                check_cancelled()
 
                 if time.monotonic() >= deadline:
                     timed_out = True
@@ -387,13 +401,13 @@ def bash(command: str, timeout: int = 30) -> str:
     text = output.decode("utf-8", errors="replace")
     notice = f"Command timed out after {timeout} seconds.\n" if timed_out else ""
 
-    return _truncate_output(f"Exit code: {process.returncode}\n{notice}{text}")
+    return truncate_output(f"Exit code: {process.returncode}\n{notice}{text}")
 
 
 TOOL_REGISTRY = Tools([read, write, edit, bash])
 
 
-def _response_tools() -> list[FunctionToolParam]:
+def response_tools() -> list[FunctionToolParam]:
     schemas: list[FunctionToolParam] = []
 
     for tool in TOOL_REGISTRY.tools():

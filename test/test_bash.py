@@ -29,7 +29,7 @@ class BashTests(unittest.TestCase):
     def test_cancel_before_launch_does_not_spawn_a_process(self) -> None:
         cancel = Event()
         cancel.set()
-        with self.tools._tool_cancellation(cancel), patch("subprocess.Popen") as spawn:
+        with self.tools.tool_cancellation(cancel), patch("subprocess.Popen") as spawn:
             with self.assertRaisesRegex(RuntimeError, "cancelled"):
                 self.tools.bash("true")
         spawn.assert_not_called()
@@ -40,7 +40,7 @@ class BashTests(unittest.TestCase):
 
         def execute() -> None:
             try:
-                with self.tools._tool_cancellation(cancel):
+                with self.tools.tool_cancellation(cancel):
                     self.tools.bash("printf ready > started; (sleep 1.5; printf leaked > late) & wait", timeout=5)
             except Exception as error:
                 errors.append(error)

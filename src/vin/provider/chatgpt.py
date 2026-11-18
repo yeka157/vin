@@ -216,13 +216,13 @@ def _execute_tool(
 ) -> str:
     from vin.tools import (
         TOOL_REGISTRY,
-        _check_cancelled,
-        _tool_cancellation,
-        _truncate_output,
+        check_cancelled,
+        tool_cancellation,
+        truncate_output,
     )
 
-    with _tool_cancellation(cancel_event):
-        _check_cancelled()
+    with tool_cancellation(cancel_event):
+        check_cancelled()
         failed = False
 
         try:
@@ -235,7 +235,7 @@ def _execute_tool(
                 }
             )
         except Exception as error:
-            _check_cancelled()
+            check_cancelled()
             failed = True
             result = f"Error ({type(error).__name__}): {error}"
 
@@ -243,8 +243,8 @@ def _execute_tool(
             match = re.match(r"Exit code: (-?\d+)\n", str(result))
             if match is not None:
                 failed = int(match.group(1)) != 0
-        output = _truncate_output(str(result))
-        _check_cancelled()
+        output = truncate_output(str(result))
+        check_cancelled()
 
         if send is not None:
             if name == "edit" and not failed:
@@ -264,7 +264,7 @@ def _request_response(
     compact_threshold: int | None = None,
     compact_only: bool = False,
 ) -> tuple["Response", bool] | None:
-    from vin.tools import _response_tools
+    from vin.tools import response_tools
 
     if cancel_event.is_set():
         return None
@@ -286,7 +286,7 @@ def _request_response(
         model=model,
         input=inputs,
         instructions=COMPACTION_PROMPT if compact_only else SYSTEM_PROMPT,
-        tools=[] if compact_only else _response_tools(),
+        tools=[] if compact_only else response_tools(),
         reasoning={"effort": "medium"},
         include=["reasoning.encrypted_content"],
         store=False,
