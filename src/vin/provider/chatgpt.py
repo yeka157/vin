@@ -17,6 +17,7 @@ from typing import (
 
 from openai.types.responses.response_create_params import ContextManagement
 
+from vin.agent import AgentError, run_agent_turn
 from vin.types import History, ModelMetadata, is_record, is_list, json_value
 from vin.provider.events import (
     EventSender,
@@ -80,10 +81,6 @@ class SetMarker(Protocol):
 
 def _has_output_item(item: "ResponseOutputItem | None") -> bool:
     return item is not None
-
-
-class _AgentError(RuntimeError):
-    pass
 
 
 COMPACTION_PROMPT = (
@@ -174,86 +171,6 @@ def list_chatgpt_models(credentials: object) -> list[ModelMetadata]:
     return models
 
 
-def _tool_detail(name: str, arguments: str) -> str:
-    try:
-        payload = cast(object, json.loads(arguments))
-    except json.JSONDecodeError:
-        return ""
-
-    if not is_record(payload):
-        return ""
-
-    keys = {
-        "read": "path",
-        "write": "path",
-        "edit": "path",
-        "bash": "command",
-    }
-
-    key = keys.get(name)
-    if key is None:
-        return ""
-
-    value = payload.get(key)
-    if not isinstance(value, str):
-        return ""
-
-    value = value.replace("\t", " ").replace("\n", " ").replace("\r", " ")
-    value = "".join(character for character in value if character.isprintable())
-    value = " ".join(value.split())
-
-    if len(value) > 120:
-        return value[:119] + "…"
-
-    return value
-
-
-def _execute_tool(
-    name: str,
-    arguments: str,
-    cancel_event: Event,
-    send: EventSender | None = None,
-) -> str:
-    from vin.tools import (
-        TOOL_REGISTRY,
-        check_cancelled,
-        tool_cancellation,
-        truncate_output,
-    )
-
-    with tool_cancellation(cancel_event):
-        check_cancelled()
-        failed = False
-
-        try:
-            (result,) = TOOL_REGISTRY.execute(
-                {
-                    "function": {
-                        "name": name,
-                        "arguments": arguments,
-                    }
-                }
-            )
-        except Exception as error:
-            check_cancelled()
-            failed = True
-            result = f"Error ({type(error).__name__}): {error}"
-
-        if name == "bash" and not failed:
-            match = re.match(r"Exit code: (-?\d+)\n", str(result))
-            if match is not None:
-                failed = int(match.group(1)) != 0
-        output = truncate_output(str(result))
-        check_cancelled()
-
-        if send is not None:
-            if name == "edit" and not failed:
-                send("tool_diff", output)
-            send("tool_failed" if failed else "tool_finished", name)
-
-        return output
-
-
 def _request_response(
     client: WireClient,
     model: str,
@@ -317,7 +234,7 @@ def _request_response(
 
             elif event.type == "response.completed":
                 if event.response.status != "completed":
-                    raise _AgentError("ChatGPT returned an incomplete response.")
+                    raise AgentError("ChatGPT returned an incomplete response.")
 
                 output = list(event.response.output or [])
                 if output:
@@ -328,16 +245,14 @@ def _request_response(
                             or output[index].id != item.id
                             or output[index].type != item.type
                         ):
-                            raise _AgentError(
+                            raise AgentError(
                                 "ChatGPT returned inconsistent response output."
                             )
                         # Done events contain finalized arguments and encrypted reasoning.
                         output[index] = item
                 else:
                     if added_output - completed_output.keys():
-                        raise _AgentError(
-                            "ChatGPT returned incomplete response output."
-                        )
+                        raise AgentError("ChatGPT returned incomplete response output.")
                     output = [
                         completed_output[index] for index in sorted(completed_output)
                     ]
@@ -352,7 +267,7 @@ def _request_response(
                 )
                 preview = "".join(streamed_text)
                 if not text.startswith(preview):
-                    raise _AgentError(
+                    raise AgentError(
                         "ChatGPT completed text did not match its streaming preview. "
                         "Please try again."
                     )
@@ -370,117 +285,9 @@ def _request_response(
                 return response, bool(text.strip())
 
             elif event.type in ("response.failed", "response.incomplete", "error"):
-                raise _AgentError(
-                    "ChatGPT response did not complete. Please try again."
-                )
+                raise AgentError("ChatGPT response did not complete. Please try again.")
 
-    raise _AgentError("ChatGPT stream ended before completion.")
-
-
-def context_after_compaction(history: History) -> History:
-    for index in range(len(history) - 1, -1, -1):
-        item = history[index]
-        if item.get("type") == "compaction":
-            return history[index:]
-    return history.copy()
-
-
-def _run_agent_turn(
-    client: WireClient,
-    model: str,
-    inputs: History,
-    send: EventSender,
-    cancel_event: Event,
-    *,
-    compact_threshold: int | None = None,
-    compact_only: bool = False,
-) -> History | None:
-    history = list(inputs)
-
-    for _ in range(16):
-        if cancel_event.is_set():
-            return None
-
-        completed = _request_response(
-            client,
-            model,
-            history,
-            send,
-            cancel_event,
-            compact_threshold=compact_threshold,
-            compact_only=compact_only,
-        )
-
-        if completed is None:
-            return None
-
-        response, has_text = completed
-
-        calls = [item for item in response.output if item.type == "function_call"]
-
-        if compact_only and calls:
-            raise _AgentError("Compaction returned unexpected tool calls.")
-
-        if len(calls) > 8:
-            raise _AgentError("Tool call limit exceeded: maximum 8.")
-
-        if any(call.status != "completed" for call in calls):
-            raise _AgentError("Response contains an incomplete tool call.")
-
-        for item in response.output:
-            dumped = json_value(cast(object, item.model_dump(exclude_none=True)))
-            if not isinstance(dumped, dict):
-                raise _AgentError("ChatGPT returned invalid response output.")
-            history.append(dumped)
-
-        has_compaction = any(item.type == "compaction" for item in response.output)
-
-        if has_compaction:
-            history = context_after_compaction(history)
-
-        if compact_only:
-            return history if has_compaction else None
-
-        if not calls:
-            if not has_text:
-                types = sorted(
-                    {
-                        item.type if item.type in ("message", "reasoning") else "other"
-                        for item in response.output
-                    }
-                )
-                raise _AgentError(
-                    "ChatGPT returned an empty response "
-                    f"(status=completed; output={','.join(types) or 'none'}). "
-                    "Please try again."
-                )
-
-            return history
-
-        for call in calls:
-            if cancel_event.is_set():
-                return None
-
-            send(
-                "tool_started",
-                {
-                    "name": call.name,
-                    "detail": _tool_detail(call.name, call.arguments),
-                },
-            )
-            result = _execute_tool(call.name, call.arguments, cancel_event, send)
-
-            if cancel_event.is_set():
-                return None
-
-            history.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": call.call_id,
-                    "output": result,
-                }
-            )
-    raise _AgentError("Model request limit exceeded: maximum 16.")
+    raise AgentError("ChatGPT stream ended before completion.")
 
 
 def stream_chatgpt_response(
@@ -561,15 +368,45 @@ def stream_chatgpt_response(
             timeout=60,
             max_retries=0,
         ) as client:
-            history = _run_agent_turn(
-                _wire_client(client),
-                model,
+            wire = _wire_client(client)
+
+            def request(history: History) -> tuple[History, bool] | None:
+                completed = _request_response(
+                    wire,
+                    model,
+                    history,
+                    send,
+                    cancel_event,
+                    compact_threshold=compact_threshold,
+                    compact_only=compact_only,
+                )
+                if completed is None:
+                    return None
+
+                response, has_text = completed
+
+                items: History = []
+
+                for item in response.output:
+                    dumped = json_value(
+                        cast(object, item.model_dump(exclude_none=True))
+                    )
+
+                    if not isinstance(dumped, dict):
+                        raise AgentError("ChatGPT returned invalid response output.")
+
+                    items.append(dumped)
+
+                return items, has_text
+
+            history = run_agent_turn(
+                request,
                 messages,
                 send,
                 cancel_event,
-                compact_threshold=compact_threshold,
-                compact_only=compact_only,
+                compact_only=compact_only
             )
+
             if history is None and not compact_only:
                 return
             outcome = ("complete", history)
@@ -593,7 +430,7 @@ def stream_chatgpt_response(
         )
     except openai.APIConnectionError:
         outcome = ("error", "Could not connect to ChatGPT. Please try again.")
-    except _AgentError as error:
+    except AgentError as error:
         outcome = ("error", str(error))
     except Exception:
         outcome = ("error", "ChatGPT request failed. Please try again.")

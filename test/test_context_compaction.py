@@ -3,7 +3,7 @@
 from copy import deepcopy
 import unittest
 
-from vin.provider import chatgpt
+from vin import agent
 from vin.types import History, ProviderItem
 
 
@@ -22,7 +22,7 @@ class CompactedContextTests(unittest.TestCase):
         for history in fixtures:
             with self.subTest(empty=not history):
                 before = deepcopy(history)
-                result = chatgpt.context_after_compaction(history)
+                result = agent.context_after_compaction(history)
                 self.assertEqual(result, before)
                 self.assertEqual(history, before)
                 self.assertIsNot(result, history)
@@ -52,7 +52,7 @@ class CompactedContextTests(unittest.TestCase):
         for original, expected in cases:
             with self.subTest(item_count=len(original)):
                 before = deepcopy(original)
-                result = chatgpt.context_after_compaction(original)
+                result = agent.context_after_compaction(original)
                 self.assertEqual(result, expected)
                 self.assertEqual(original, before)
                 self.assertIsNot(result, original)
