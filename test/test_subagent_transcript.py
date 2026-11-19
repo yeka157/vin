@@ -113,6 +113,28 @@ class SubagentTranscriptTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(text in content for _, content in main for text in ("Looking.", "Found it.", "storage.py")))
         self.assertIsNone(self.owner.last_usage)
 
+    async def test_a_new_turn_hides_the_previous_turns_subagents_but_compaction_does_not(self) -> None:
+        old: Subagent = {"id": "call_old", "description": "x", "status": "finished", "started_at": 0.0,
+                         "duration": 1.0, "tokens": 0, "transcript": []}
+        self.owner.subagents = [old]
+        self.owner.panel_index = 1
+        task, events = await self.start_turn()
+
+        self.assertEqual((self.owner.panel_start, self.owner.panel_index), (1, None))
+        self.assertEqual(self.owner.panel_agents(), [])
+        await self.emit(events, ("tool_started", TASK_STARTED))
+        self.assertEqual([agent["id"] for agent in self.owner.panel_agents()], ["call_task"])
+        await self.emit(events, ("tool_finished", "task"), ("text", "Done"), ("complete", None))
+        await asyncio.wait_for(task, 2)
+
+        self.owner.panel_start = 0
+        compaction = asyncio.create_task(self.owner.stream_reply("", compact_only=True))
+        self.owner.pending_reply = compaction
+        await asyncio.sleep(0)
+        self.assertEqual(self.owner.panel_start, 0)
+        compaction.cancel()
+        await asyncio.gather(compaction, return_exceptions=True)
+
     async def test_a_failed_task_marks_its_subagent_failed(self) -> None:
         task, events = await self.start_turn()
         await self.emit(events, ("tool_started", TASK_STARTED), tagged(("text", "Trying")),

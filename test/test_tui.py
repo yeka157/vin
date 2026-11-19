@@ -1025,7 +1025,10 @@ class ModelCommandTests(unittest.TestCase):
                                 await asyncio.wait_for(task, timeout=1)
                         else:
                             assert isinstance(key, Keys)
-                            binding = bindings.get_bindings_for_keys((key,))[-1]
+                            binding = next(
+                                item for item in reversed(bindings.get_bindings_for_keys((key,)))
+                                if item.handler.__name__ != "return_to_main"
+                            )
                             self.assertTrue(binding.filter())
                             if key == Keys.Escape:
                                 self.assertTrue(binding.eager())

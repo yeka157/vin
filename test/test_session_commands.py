@@ -243,10 +243,13 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         storage.save_session(self.project, record)
         self.picker.side_effect = None
         self.picker.return_value = record["id"]
+        self.owner.viewed, self.owner.panel_index = "stale", 1
 
         with patch.object(app, "stream_chatgpt_response", side_effect=AssertionError("Resume must not run a provider")):
             await self.resume()
 
+        self.assertEqual((self.owner.panel_start, self.owner.viewed, self.owner.panel_index), (2, None, None))
+        self.assertEqual(self.owner.panel_agents(), [], "Restored subagents stay out of the panel.")
         restored_running, restored_finished = self.owner.subagents
         self.assertEqual([(item["id"], item["status"], item["duration"], item["tokens"])
                           for item in self.owner.subagents],

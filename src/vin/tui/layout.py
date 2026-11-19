@@ -21,6 +21,7 @@ from prompt_toolkit.styles import Style
 
 from vin.tui.bindings import create_bindings
 from vin.tui.completion import SessionCompleter
+from vin.tui.subagents import panel_text
 
 if TYPE_CHECKING:
     from vin.tui.app import VinApp
@@ -151,6 +152,26 @@ def build_workspace(app: "VinApp") -> None:
             ),
             Window(height=1, char="─", style="class:input-border"),
             app.input_window,
+            ConditionalContainer(
+                Window(
+                    FormattedTextControl(
+                        lambda: panel_text(
+                            app.panel_agents(),
+                            app.viewed,
+                            app.panel_index,
+                            (
+                                app.session_record["name"]
+                                if app.session_record is not None
+                                else "main"
+                            ),
+                        ),
+                        show_cursor=False,
+                    ),
+                    dont_extend_height=True,
+                    wrap_lines=False,
+                ),
+                filter=Condition(lambda: bool(app.panel_agents())),
+            ),
             Window(height=1, char="─", style="class:input-border"),
             Window(
                 FormattedTextControl(lambda: app.model_indicator_text()),

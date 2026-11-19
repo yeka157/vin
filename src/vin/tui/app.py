@@ -225,11 +225,25 @@ class VinApp:
         self.last_session_checkpoint: float | None = None
         self.session_save_error: str | None = None
         self.subagents: list[Subagent] = []
+        self.viewed: str | None = None
+        self.panel_start = 0
+        self.panel_index: int | None = None
+
+    def panel_agents(self) -> list[Subagent]:
+        return self.subagents[self.panel_start :]
+
+    def viewed_subagent(self) -> Subagent | None:
+        return next(
+            (item for item in self.subagents if item["id"] == self.viewed), None
+        )
 
     def checkpoint_session(self, *, force: bool = False) -> bool:
         return conversations.checkpoint_session(self, force=force)
 
     def get_transcript_entries(self) -> list[TranscriptEntry]:
+        subagent = self.viewed_subagent()
+        if subagent is not None:
+            return list(subagent["transcript"])
         entries = list(self.transcript)
         if self.request_started_at is not None:
             now = monotonic()
@@ -375,6 +389,10 @@ class VinApp:
         tool_entry: ToolEntry | None = None
         subagent: Subagent | None = None
         self.tool_status = None
+
+        if not compact_only:
+            self.panel_start = len(self.subagents)
+            self.panel_index = None
 
         try:
             if compact_only and not request:
@@ -951,6 +969,9 @@ class VinApp:
                 }
             )
             self.subagents = []
+            self.panel_start = 0
+            self.viewed = None
+            self.panel_index = None
         elif text == "/help":
             return Markdown(
                 "**Commands**\n\n"
@@ -1049,6 +1070,9 @@ class VinApp:
         await self.load_initial_model()
 
     def model_indicator_text(self) -> str:
+        subagent = self.viewed_subagent()
+        if subagent is not None:
+            return f" Viewing task · {subagent['description']} · read-only · Esc to return"
         if self.selected_model:
             assert self.selected_provider is not None
             return (

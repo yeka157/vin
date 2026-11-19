@@ -1,9 +1,11 @@
 from copy import deepcopy
 from time import monotonic
 from typing import Literal, cast
+from prompt_toolkit.formatted_text import StyleAndTextTuples
 from rich.text import Text
 from vin.provider.events import ReplyEvent
 from vin.sessions.transcript import decode_transcript
+from vin.tui.transcript import format_duration
 from vin.types import SessionRecord, Subagent, TranscriptEntry
 
 
@@ -93,3 +95,54 @@ def restore_subagents(record: SessionRecord) -> list[Subagent]:
             subagent["duration"] = item["duration"]
         restored.append(subagent)
     return restored
+
+
+def panel_text(
+    agents: list[Subagent], viewed: str | None, selected: int | None, main_label: str
+) -> StyleAndTextTuples:
+    lines: StyleAndTextTuples = []
+    rows: list[Subagent | None] = [None, *agents]
+
+    for index, agent in enumerate(rows):
+        marker = (
+            "●"
+            if (agent is None and viewed is None)
+            or (agent is not None and agent["id"] == viewed)
+            else "○"
+        )
+
+        if agent is None:
+            text = f"{marker} {main_label}"
+        else:
+            last = agent["transcript"][-1] if agent["transcript"] else None
+            if (
+                agent["status"] == "running"
+                and last is not None
+                and last["role"] == "tool"
+                and last["status"] == "running"
+            ):
+                activity = last.get("label", last["name"])
+            elif agent["status"] == "running":
+                activity = "working"
+            else:
+                activity = agent["status"]
+
+            elapsed = (
+                agent["duration"]
+                if agent["duration"] is not None
+                else monotonic() - agent["started_at"]
+            )
+            tokens = (
+                f"{agent['tokens'] / 1000:.1f}k"
+                if agent["tokens"] >= 1000
+                else str(agent["tokens"])
+            )
+            text = f"{marker} task {agent['description']} · {activity} {format_duration(elapsed)} · ↓ {tokens} tokens"
+
+        style = "fg:#a5b4fc bold" if index == selected else "class:placeholder"
+
+        if lines:
+            lines.append(("", "\n"))
+        lines.append((style, " " + text))
+
+    return lines

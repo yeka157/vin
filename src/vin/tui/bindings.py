@@ -60,6 +60,17 @@ def create_bindings(app: "VinApp") -> KeyBindings:
 
     @bindings.add("enter", eager=True)
     def submit(event: KeyPressEvent) -> None:
+        if app.panel_index is not None:
+            agents = app.panel_agents()
+            app.viewed = (
+                None if app.panel_index == 0 else agents[app.panel_index - 1]["id"]
+            )
+            app.panel_index = None
+            app.transcript_control.scroll_to_bottom()
+            event.app.invalidate()
+            return
+        if app.viewed is not None:
+            return
         text = event.current_buffer.text
         idle = (
             app.pending_reply is None
@@ -140,5 +151,61 @@ def create_bindings(app: "VinApp") -> KeyBindings:
     )
     def insert_new_line(event: KeyPressEvent) -> None:
         event.current_buffer.insert_text("\n")
+
+    def can_enter_panel() -> bool:
+        document = app.session.default_buffer.document
+        return (
+            app.choice_future is None
+            and app.panel_index is None
+            and bool(app.panel_agents())
+            and app.session.default_buffer.complete_state is None
+            and document.cursor_position_row == document.line_count - 1
+        )
+
+    @bindings.add("down", filter=Condition(can_enter_panel))
+    def enter_panel(event: KeyPressEvent) -> None:
+        app.panel_index = (
+            0
+            if app.viewed is None
+            else next(
+                (
+                    index + 1
+                    for index, agent in enumerate(app.panel_agents())
+                    if agent["id"] == app.viewed
+                ),
+                0,
+            )
+        )
+
+        event.app.invalidate()
+
+    @bindings.add("up", filter=Condition(lambda: app.panel_index is not None))
+    def panel_up(event: KeyPressEvent) -> None:
+        assert app.panel_index is not None
+        if app.panel_index == 0:
+            app.panel_index = None
+        else:
+            app.panel_index -= 1
+
+        event.app.invalidate()
+
+    @bindings.add("down", filter=Condition(lambda: app.panel_index is not None))
+    def panel_down(event: KeyPressEvent) -> None:
+        assert app.panel_index is not None
+        app.panel_index = min(app.panel_index + 1, len(app.panel_agents()))
+        event.app.invalidate()
+
+    @bindings.add(
+        "escape",
+        filter=Condition(
+            lambda: app.choice_future is None
+            and (app.panel_index is not None or app.viewed is not None)
+        ),
+    )
+    def return_to_main(event: KeyPressEvent) -> None:
+        app.panel_index = None
+        app.viewed = None
+        app.transcript_control.scroll_to_bottom()
+        event.app.invalidate()
 
     return bindings
