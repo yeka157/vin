@@ -44,7 +44,7 @@ class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
         first = "--- f\n+++ f\n@@ -1 +1 @@\n-before\n+middle\n"
         second = "--- f\n+++ f\n@@ -1 +1 @@\n-middle\n+after\n"
 
-        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, **_options: object) -> None:
             events.tools_used.set()
             for diff in (first, second):
                 events.put(("tool_started", {"name": "edit", "detail": "f"}))
@@ -72,7 +72,7 @@ class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(terminal=terminal):
                 previous_rows = [entry for entry in self.owner.transcript if entry["role"] == "tool"]
                 release_status, release_answer, stopped = Event(), Event(), Event()
-                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
+                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, **_options: object) -> None:
                     try:
                         events.tools_used.set()
                         events.put(("tool_started", "read"))
@@ -123,7 +123,7 @@ class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
         for keyboard in (False, True):
             with self.subTest(keyboard=keyboard):
                 release, stopped = Event(), Event()
-                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
+                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, **_options: object) -> None:
                     try:
                         events.tools_used.set()
                         events.put(("tool_started", {"name": "bash", "detail": "printf '[red]hello[/red]'"}))

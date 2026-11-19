@@ -229,7 +229,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
         seen: list[tuple[int, Credentials | None, str | None, History, Event]] = []
         ui_thread = get_ident()
 
-        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None) -> None:
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None, **_options: object) -> None:
             seen.append((get_ident(), credentials, model, messages, cancel_event))
             events.put(("text", "**Hel"))
             release.wait(2)
@@ -292,7 +292,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
                 cancel_events: list[Event] = []
                 assert kind == "error" or kind == "rate_limit"
 
-                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, event_kind: Literal["error", "rate_limit"] = kind, *, compact_threshold: int | None = None) -> None:
+                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, event_kind: Literal["error", "rate_limit"] = kind, *, compact_threshold: int | None = None, **_options: object) -> None:
                     cancel_events.append(cancel_event)
                     if partial:
                         events.put(("text", partial))
@@ -330,7 +330,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
         old_release, new_release, old_finished = Event(), Event(), Event()
         seen: list[tuple[ReplyEvents, Event]] = []
 
-        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None) -> None:
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None, **_options: object) -> None:
             seen.append((events, cancel_event))
             if len(seen) == 1:
                 try:
@@ -679,7 +679,7 @@ class ModelCommandTests(unittest.TestCase):
                         while not predicate():
                             await REAL_SLEEP(0.001)
 
-                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
+                def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, **_options: object) -> None:
                     requests.append((messages, cancel_event))
                     question = messages[-1]["content"]
                     if question == "first":

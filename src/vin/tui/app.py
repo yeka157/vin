@@ -37,7 +37,13 @@ from vin.provider.model_cache import (
     load_cached_chatgpt_models,
     save_cached_chatgpt_models,
 )
-from vin.provider.preferences import load_model_preference, save_model_preference
+from vin.provider.preferences import (
+    DEFAULT_SUBAGENT_SETTINGS,
+    load_model_preference,
+    load_subagent_settings,
+    save_model_preference,
+    save_subagent_settings,
+)
 from vin.sessions.records import new_session
 from vin.tools import LAUNCH_DIR
 from vin.tui import conversations
@@ -57,6 +63,7 @@ from vin.types import (
     ModelPreference,
     SessionRecord,
     Subagent,
+    SubagentSettings,
     ToolEntry,
     TranscriptEntry,
 )
@@ -181,6 +188,8 @@ def get_chatgpt_model_preference(
 class ReplyOptions(TypedDict, total=False):
     compact_threshold: int
     compact_only: bool
+    subagents: bool
+    subagent_budget: int
 
 
 class VinApp:
@@ -228,6 +237,7 @@ class VinApp:
         self.viewed: str | None = None
         self.panel_start = 0
         self.panel_index: int | None = None
+        self.subagent_settings: SubagentSettings = DEFAULT_SUBAGENT_SETTINGS.copy()
 
     def panel_agents(self) -> list[Subagent]:
         return self.subagents[self.panel_start :]
@@ -439,6 +449,10 @@ class VinApp:
                 options["compact_threshold"] = compact_threshold
             if compact_only:
                 options["compact_only"] = True
+
+            if not compact_only:
+                options["subagents"] = self.subagent_settings["enabled"]
+                options["subagent_budget"] = self.subagent_settings["budget"]
 
             Thread(
                 target=stream_chatgpt_response,
@@ -877,6 +891,26 @@ class VinApp:
                                 self.transcript.append(
                                     {"role": "notice", "content": outcome}
                                 )
+                        elif text == "/settings":
+                            try:
+                                outcome = await self.change_settings()
+                            except (RuntimeError, OSError, ValueError) as error:
+                                outcome = Text(str(error), style="red")
+                            self.transcript.append({"role": "user", "content": text})
+                            if outcome is not None:
+                                self.transcript.append(
+                                    {"role": "notice", "content": outcome}
+                                )
+                        elif text == "/tasks":
+                            try:
+                                outcome = await self.open_task()
+                            except (RuntimeError, OSError, ValueError) as error:
+                                outcome = Text(str(error), style="red")
+                            self.transcript.append({"role": "user", "content": text})
+                            if outcome is not None:
+                                self.transcript.append(
+                                    {"role": "notice", "content": outcome}
+                                )
                         elif text == "/compact":
                             self.reply_entry = None
                             self.pending_reply = asyncio.create_task(
@@ -982,6 +1016,8 @@ class VinApp:
                 "- `/rename <name>` - Rename the current conversation\n"
                 "- `/model` - Set the AI model\n"
                 "- `/compact` - Compact the conversation context\n"
+                "- `/settings` - Manage settings\n"
+                "- `/tasks` - View tasks from this conversation\n"
                 "- `/login` - Sign in with ChatGPT Subscription\n"
                 "- `/logout` - Sign out\n"
                 "- `/quit` or `/exit` - leave Vin"
@@ -1025,6 +1061,13 @@ class VinApp:
         self.selected_model = preference["model"]
 
     async def initialize_session(self, *, sign_in: bool = False) -> None:
+        if not sign_in:
+            try:
+                self.subagent_settings = load_subagent_settings()
+            except RuntimeError as error:
+                self.transcript.append(
+                    {"role": "notice", "content": Text(str(error), style="red")}
+                )
         if self.credentials is None and not sign_in:
             self.credentials = await asyncio.to_thread(load_active_session)
 
@@ -1072,7 +1115,9 @@ class VinApp:
     def model_indicator_text(self) -> str:
         subagent = self.viewed_subagent()
         if subagent is not None:
-            return f" Viewing task · {subagent['description']} · read-only · Esc to return"
+            return (
+                f" Viewing task · {subagent['description']} · read-only · Esc to return"
+            )
         if self.selected_model:
             assert self.selected_provider is not None
             return (
@@ -1099,3 +1144,65 @@ class VinApp:
         build_workspace(self)
         self.loading_model = True
         self.run_conversation()
+
+    async def change_settings(self) -> str | None:
+        settings = self.subagent_settings
+        try:
+            choice = await self.choose_inline(
+                "Settings",
+                [
+                    (
+                        "enabled",
+                        f"Subagents: {'on' if settings['enabled'] else 'off'}",
+                    ),
+                    ("budget", f"Subagent request limit: {settings['budget']}"),
+                ],
+            )
+        except asyncio.CancelledError:
+            if _task_is_cancelling():
+                raise
+            return None
+
+        if choice == "enabled":
+            updated: SubagentSettings = {
+                "enabled": not settings["enabled"],
+                "budget": settings["budget"],
+            }
+        else:
+            try:
+                value = await self.choose_inline(
+                    "Subagent request limit",
+                    [(str(number), str(number)) for number in range(1, 33)],
+                    default=str(settings["budget"]),
+                )
+            except asyncio.CancelledError:
+                if _task_is_cancelling():
+                    raise
+                return None
+
+            updated = {"enabled": settings["enabled"], "budget": int(value)}
+
+        save_subagent_settings(updated)
+        self.subagent_settings = updated
+        return f"Subagents {'on' if updated['enabled'] else 'off'} · request limit {updated['budget']}"
+
+    async def open_task(self) -> str | None:
+        if not self.subagents:
+            return "No subagents in this conversation."
+
+        try:
+            choice = await self.choose_inline(
+                "Open a subagent",
+                [
+                    (item["id"], f"{item['description']} · {item['status']}")
+                    for item in reversed(self.subagents)
+                ],
+            )
+        except asyncio.CancelledError:
+            if _task_is_cancelling():
+                raise
+            return None
+        self.viewed = choice
+        self.panel_index = None
+        self.transcript_control.scroll_to_bottom()
+        return None

@@ -209,7 +209,7 @@ class StreamingResponseTests(unittest.TestCase):
         finally:
             self.closed.append("stream")
 
-    def invoke(self, source: Iterable[ResponseStreamEvent] = (), *, credentials: object = ..., model: object = "selected-model", compact_only: bool = False) -> Mock:
+    def invoke(self, source: Iterable[ResponseStreamEvent] = (), *, credentials: object = ..., model: object = "selected-model", compact_only: bool = False, subagents: bool = True, subagent_budget: int = 8) -> Mock:
         self.client.responses.create.return_value = self.stream(source)
         if credentials is ...:
             credentials = self.credentials
@@ -220,7 +220,7 @@ class StreamingResponseTests(unittest.TestCase):
         ):
             chatgpt.stream_chatgpt_response(
                 credentials, model, self.messages, self.events, self.cancel,
-                compact_only=compact_only,
+                compact_only=compact_only, subagents=subagents, subagent_budget=subagent_budget,
             )
         self.assertEqual(output.getvalue(), "")
         return constructor
@@ -265,6 +265,28 @@ class StreamingResponseTests(unittest.TestCase):
             "include": ["reasoning.encrypted_content"],
             "store": False, "stream": True,
         })
+
+    def test_subagents_off_drops_the_task_tool_and_its_prompt(self) -> None:
+        submitted: list[RequestSnapshot] = []
+
+        def source() -> Iterator[ResponseStreamEvent]:
+            submitted.append(REQUEST_ADAPTER.validate_python(cast(object, self.client.responses.create.call_args.kwargs)))
+            yield self.lifecycle()
+
+        self.invoke(source(), subagents=False)
+
+        from vin.tools import response_tools
+        request, = submitted
+        self.assertEqual(request["instructions"], chatgpt.SYSTEM_PROMPT)
+        self.assertEqual(request["tools"], response_tools())
+        self.assertNotIn("task", [tool["name"] for tool in request["tools"]])
+
+    def test_subagent_settings_reach_the_agent_loop(self) -> None:
+        with patch.object(chatgpt, "run_agent_turn", return_value=None) as turn:
+            self.invoke(subagents=False, subagent_budget=3)
+
+        options = cast(dict[str, object], turn.call_args.kwargs)
+        self.assertEqual((options["subagents"], options["subagent_budget"]), (False, 3))
 
     def test_added_null_item_does_not_block_completed_done_output(self) -> None:
         completed = self.lifecycle(text="Done")

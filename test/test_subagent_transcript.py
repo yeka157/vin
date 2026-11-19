@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Callable
 from queue import SimpleQueue
 from threading import Event
-from typing import Literal
+from typing import Literal, cast
 import unittest
 from unittest.mock import patch
 
@@ -51,7 +51,7 @@ class SubagentTranscriptTests(unittest.IsolatedAsyncioTestCase):
         queues: SimpleQueue[ReplyEvents] = SimpleQueue()
 
         def worker(_credentials: Credentials | None, _model: str | None, _messages: History,
-                   events: ReplyEvents, _cancel_event: Event) -> None:
+                   events: ReplyEvents, _cancel_event: Event, **_options: object) -> None:
             try:
                 queues.put(events)
                 entered.set()
@@ -59,7 +59,7 @@ class SubagentTranscriptTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 stopped.set()
 
-        self.enterContext(patch.object(app_module, "stream_chatgpt_response", side_effect=worker))
+        self.stream = self.enterContext(patch.object(app_module, "stream_chatgpt_response", side_effect=worker))
         self.owner.transcript.append({"role": "user", "content": "Delegate it."})
         task = asyncio.create_task(self.owner.stream_reply("Delegate it."))
         self.owner.pending_reply = task
@@ -132,8 +132,17 @@ class SubagentTranscriptTests(unittest.IsolatedAsyncioTestCase):
         self.owner.pending_reply = compaction
         await asyncio.sleep(0)
         self.assertEqual(self.owner.panel_start, 0)
+        await self.wait_until(lambda: self.stream.call_count == 2)
+        self.assertNotIn("subagents", self.stream.call_args.kwargs)
         compaction.cancel()
         await asyncio.gather(compaction, return_exceptions=True)
+
+    async def test_a_turn_passes_the_saved_subagent_settings(self) -> None:
+        self.owner.subagent_settings = {"enabled": False, "budget": 3}
+        await self.start_turn()
+
+        options = cast(dict[str, object], self.stream.call_args.kwargs)
+        self.assertEqual((options["subagents"], options["subagent_budget"]), (False, 3))
 
     async def test_a_failed_task_marks_its_subagent_failed(self) -> None:
         task, events = await self.start_turn()

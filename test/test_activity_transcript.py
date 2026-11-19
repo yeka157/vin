@@ -43,7 +43,7 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
         entered, release, stopped = Event(), Event(), Event()
         queues: SimpleQueue[ReplyEvents] = SimpleQueue()
 
-        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, **_options: object) -> None:
             try:
                 queues.put(events)
                 entered.set()

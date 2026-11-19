@@ -186,6 +186,7 @@ def _request_response(
     compact_threshold: int | None = None,
     compact_only: bool = False,
     subagent: bool = False,
+    task: bool = True,
 ) -> tuple["Response", bool] | None:
     from vin.tools import response_tools
 
@@ -214,10 +215,10 @@ def _request_response(
             else (
                 SYSTEM_PROMPT + SUBAGENT_PROMPT
                 if subagent
-                else SYSTEM_PROMPT + TASK_PROMPT
+                else SYSTEM_PROMPT + TASK_PROMPT if task else SYSTEM_PROMPT
             )
         ),
-        tools=[] if compact_only else response_tools(task=not subagent),
+        tools=[] if compact_only else response_tools(task=task and not subagent),
         reasoning={"effort": "medium"},
         include=["reasoning.encrypted_content"],
         store=False,
@@ -313,6 +314,8 @@ def stream_chatgpt_response(
     *,
     compact_threshold: int | None = None,
     compact_only: bool = False,
+    subagents: bool = True,
+    subagent_budget: int = 8,
 ) -> None:
     """Run on a worker thread; publish text, complete, or error queue events."""
 
@@ -408,6 +411,7 @@ def stream_chatgpt_response(
                     compact_threshold=compact_threshold,
                     compact_only=compact_only,
                     subagent=subagent,
+                    task=subagents,
                 )
                 if completed is None:
                     return None
@@ -435,6 +439,8 @@ def stream_chatgpt_response(
                 cancel_event,
                 compact_only=compact_only,
                 subagent_sender=subagent_send,
+                subagents=subagents,
+                subagent_budget=subagent_budget,
             )
 
             if history is None and not compact_only:

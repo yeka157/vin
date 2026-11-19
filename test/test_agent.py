@@ -169,6 +169,19 @@ class TaskToolTests(unittest.TestCase):
         self.assertEqual(self.child_seen[1][-1].get("output"), "Error (ValueError): Tool 'task' not registered.")
         self.assertEqual(self.task_output(), "Could not delegate.")
 
+    def test_task_is_not_run_when_subagents_are_off(self) -> None:
+        replies = iter([(task_call(), False), (answer("Done"), True)])
+
+        def request(history: History, _sender: EventSender, subagent: bool) -> tuple[History, bool] | None:
+            self.assertFalse(subagent)
+            self.parent_seen.append(list(history))
+            return next(replies)
+
+        agent.run_agent_turn(request, [{"role": "user", "content": "Delegate it."}], self.send, self.cancel,
+                             subagents=False)
+
+        self.assertEqual(self.task_output(), "Error (ValueError): Tool 'task' not registered.")
+
     def test_cancelling_inside_a_subagent_ends_the_parent_turn(self) -> None:
         def child(_history: History, _sender: EventSender) -> None:
             self.cancel.set()

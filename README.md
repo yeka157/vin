@@ -88,6 +88,8 @@ Vin shows its progress and tool activity as it works. Completed tool groups coll
 | `/resume <title-or-id>` | Resume a conversation by its exact title or full session ID |
 | `/rename <name>` | Rename the current conversation |
 | `/compact` | Compact the conversation context while Vin is idle |
+| `/settings` | Turn subagents on or off and set their request limit (1–32), remembered for future launches |
+| `/tasks` | Open any subagent from this conversation (read-only) |
 | `/exit` or `/quit` | Exit Vin |
 
 ## Keyboard and navigation

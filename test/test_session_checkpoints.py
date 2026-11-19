@@ -422,7 +422,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.session_id = present(self.owner.session_record)["id"]
 
     async def run_turn(self, emitted: Sequence[ReplyEvent], *, compact_only: bool = False) -> Literal["error", "rate_limit"] | None:
-        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None, compact_only: bool = False) -> None:
+        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None, compact_only: bool = False, **_options: object) -> None:
             self.request_thresholds.append(compact_threshold)
             self.request_modes.append(compact_only)
             self.request_contexts.append(deepcopy(request))
@@ -507,7 +507,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.owner.queued_prompts.append("Next request")
         context: History = [{"type": "compaction", "id": "cmp_late", "encrypted_content": "fake-late-context"}]
 
-        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None, compact_only: bool = False) -> None:
+        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event, *, compact_threshold: int | None = None, compact_only: bool = False, **_options: object) -> None:
             self.request_contexts.append(deepcopy(request))
             self.request_modes.append(compact_only)
             try:
@@ -715,7 +715,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_reply_saves_interruption_and_ignores_late_worker_events(self) -> None:
         stopped = Event()
 
-        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event) -> None:
+        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event, **_options: object) -> None:
             try:
                 events.tools_used.set()
                 events.put(("tool_started", {"name": "read", "detail": "example.py"}))
@@ -760,7 +760,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         queues: SimpleQueue[ReplyEvents] = SimpleQueue()
         release, stopped = Event(), Event()
 
-        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event) -> None:
+        def worker(credentials: Credentials | None, model: str | None, request: History, events: ReplyEvents, cancel_event: Event, **_options: object) -> None:
             try:
                 queues.put(events)
                 release.wait(3)

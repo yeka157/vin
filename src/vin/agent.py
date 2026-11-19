@@ -114,6 +114,7 @@ def run_agent_turn(
     max_requests: int = 16,
     subagent_budget: int = 8,
     subagent_sender: SubagentSender | None = None,
+    subagents: bool = True,
 ) -> History | None:
     history = list(inputs)
 
@@ -190,7 +191,7 @@ def run_agent_turn(
             ):
                 raise AgentError("ChatGPT returned invalid response output.")
 
-            if name == "task" and not subagent:
+            if name == "task" and subagents and not subagent:
                 result = run_task(
                     request,
                     call_id,

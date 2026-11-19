@@ -240,3 +240,8 @@ class EncodedEntry(TypedDict, total=False):
     detail: object
     label: object
     diff: object
+
+
+class SubagentSettings(TypedDict):
+    enabled: bool
+    budget: int

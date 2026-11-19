@@ -43,7 +43,7 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.exchange = self.enterContext(patch.object(auth, "exchange_refresh_token", return_value=self.tokens))
         self.save = self.enterContext(patch.object(auth, "save_credential_record"))
         self.seen: list[Credentials | None] = []
-        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event) -> None:
+        def worker(credentials: Credentials | None, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, **_options: object) -> None:
             self.seen.append(credentials)
             events.put(("text", "Done"))
             events.put(("complete", None))

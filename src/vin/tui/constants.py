@@ -13,6 +13,8 @@ COMMANDS = {
     "/quit",
     "/exit",
     "/compact",
+    "/settings",
+    "/tasks",
 }
 
 
