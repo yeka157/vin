@@ -137,6 +137,16 @@ class NoticeEntry(EntryFlags):
 type TranscriptEntry = UserEntry | AssistantEntry | ToolEntry | NoticeEntry
 
 
+class Subagent(TypedDict):
+    id: str
+    description: str
+    status: Literal["running", "finished", "failed", "interrupted"]
+    started_at: float
+    duration: float | None
+    tokens: int
+    transcript: list[TranscriptEntry]
+
+
 class SavedSpan(TypedDict):
     start: int
     end: int

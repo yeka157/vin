@@ -43,6 +43,7 @@ from vin.tools import LAUNCH_DIR
 from vin.tui import conversations
 from vin.tui.constants import PROVIDER_LABELS, is_command
 from vin.tui.layout import build_workspace
+from vin.tui.subagents import apply_subagent_event, finish_subagent
 from vin.tui.transcript import TranscriptControl, format_duration, render_transcript
 from vin.provider.events import ReplyEvents, TokenUsage
 from vin.types import (
@@ -55,6 +56,7 @@ from vin.types import (
     ModelMetadata,
     ModelPreference,
     SessionRecord,
+    Subagent,
     ToolEntry,
     TranscriptEntry,
 )
@@ -222,6 +224,7 @@ class VinApp:
         self.active_turn: ActiveTurn | None = None
         self.last_session_checkpoint: float | None = None
         self.session_save_error: str | None = None
+        self.subagents: list[Subagent] = []
 
     def checkpoint_session(self, *, force: bool = False) -> bool:
         return conversations.checkpoint_session(self, force=force)
@@ -370,6 +373,7 @@ class VinApp:
         completed = False
         text_dirty = False
         tool_entry: ToolEntry | None = None
+        subagent: Subagent | None = None
         self.tool_status = None
 
         try:
@@ -480,6 +484,19 @@ class VinApp:
                             "content": Text(f"● {label} · running", style="dim"),
                         }
                         self.transcript.append(tool_entry)
+                        if isinstance(value, dict) and "task_id" in value:
+                            subagent = {
+                                "id": value["task_id"],
+                                "description": detail,
+                                "status": "running",
+                                "started_at": monotonic(),
+                                "duration": None,
+                                "tokens": 0,
+                                "transcript": [
+                                    {"role": "user", "content": value.get("prompt", "")}
+                                ],
+                            }
+                            self.subagents.append(subagent)
                     elif tool_entry is not None:
                         assert "label" in tool_entry
                         tool_entry["status"] = state
@@ -488,6 +505,23 @@ class VinApp:
                             style="red" if kind == "tool_failed" else "dim",
                         )
                         tool_entry = None
+                        if subagent is not None:
+                            finish_subagent(
+                                subagent,
+                                "failed" if kind == "tool_failed" else "finished",
+                            )
+                            subagent = None
+                elif event[0] == "subagent":
+                    target = next(
+                        (
+                            item
+                            for item in self.subagents
+                            if item["id"] == event[1]["task_id"]
+                        ),
+                        None,
+                    )
+                    if target is not None:
+                        apply_subagent_event(target, event[1]["event"])
                 elif event[0] == "complete":
                     value = event[1]
                     entry["streaming"] = False
@@ -534,7 +568,7 @@ class VinApp:
                         self.active_turn["tools_used"] = True
                     if self.checkpoint_session(force=True):
                         text_dirty = False
-                elif kind == "text":
+                elif kind in ("text", "subagent"):
                     if self.checkpoint_session():
                         text_dirty = False
 
@@ -553,6 +587,8 @@ class VinApp:
                     f"● {tool_entry['label']} · {interrupted_state}",
                     style="yellow" if interrupted else "red",
                 )
+                if subagent is not None:
+                    finish_subagent(subagent, interrupted_state)
             if not completed and events.tools_used.is_set():
                 self.messages.extend(
                     [
@@ -914,6 +950,7 @@ class VinApp:
                     "persist": False,
                 }
             )
+            self.subagents = []
         elif text == "/help":
             return Markdown(
                 "**Commands**\n\n"
