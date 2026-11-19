@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from typing import (
     TYPE_CHECKING,
+    Callable,
     Literal,
     Protocol,
     TypedDict,
@@ -315,39 +316,51 @@ def stream_chatgpt_response(
 ) -> None:
     """Run on a worker thread; publish text, complete, or error queue events."""
 
-    @overload
-    def send(kind: TextEventKind, value: str) -> None: ...
-    @overload
-    def send(kind: ToolEventKind, value: ToolStarted | str) -> None: ...
-    @overload
-    def send(kind: Literal["usage"], value: TokenUsage) -> None: ...
-    @overload
-    def send(kind: Literal["complete"], value: History | None) -> None: ...
-    def send(
-        kind: TextEventKind | ToolEventKind | Literal["usage", "complete"],
-        value: str | ToolStarted | TokenUsage | History | None = None,
-    ) -> None:
-        if kind == "tool_started":
-            marker = cast(object, getattr(events, "tools_used", None))
-            if isinstance(marker, SetMarker):
-                marker.set()
-        if cancel_event.is_set():
-            return
-        if compact_only and kind == "text":
-            return
-        if kind in ("text", "tool_diff", "error", "rate_limit") and isinstance(
-            value, str
-        ):
-            events.put((kind, value))
-        elif kind in ("tool_started", "tool_finished", "tool_failed"):
-            if isinstance(value, str):
-                events.put((kind, value))
-            elif isinstance(value, dict) and "name" in value:
-                events.put((kind, value))
-        elif kind == "usage" and isinstance(value, dict) and "input_tokens" in value:
-            events.put((kind, value))
-        elif kind == "complete" and (value is None or isinstance(value, list)):
-            events.put((kind, value))
+    def make_send(put: Callable[[ReplyEvent], None]) -> EventSender:
+        @overload
+        def send(kind: TextEventKind, value: str) -> None: ...
+        @overload
+        def send(kind: ToolEventKind, value: ToolStarted | str) -> None: ...
+        @overload
+        def send(kind: Literal["usage"], value: TokenUsage) -> None: ...
+        @overload
+        def send(kind: Literal["complete"], value: History | None) -> None: ...
+        def send(
+            kind: TextEventKind | ToolEventKind | Literal["usage", "complete"],
+            value: str | ToolStarted | TokenUsage | History | None = None,
+        ) -> None:
+            if kind == "tool_started":
+                marker = cast(object, getattr(events, "tools_used", None))
+                if isinstance(marker, SetMarker):
+                    marker.set()
+            if cancel_event.is_set():
+                return
+            if compact_only and kind == "text":
+                return
+            if kind in ("text", "tool_diff", "error", "rate_limit") and isinstance(
+                value, str
+            ):
+                put((kind, value))
+            elif kind in ("tool_started", "tool_finished", "tool_failed"):
+                if isinstance(value, str):
+                    put((kind, value))
+                elif isinstance(value, dict) and "name" in value:
+                    put((kind, value))
+            elif (
+                kind == "usage" and isinstance(value, dict) and "input_tokens" in value
+            ):
+                put((kind, value))
+            elif kind == "complete" and (value is None or isinstance(value, list)):
+                put((kind, value))
+
+        return send
+
+    send = make_send(events.put)
+
+    def subagent_send(task_id: str) -> EventSender:
+        return make_send(
+            lambda event: events.put(("subagent", {"task_id": task_id, "event": event}))
+        )
 
     if cancel_event.is_set():
         return
@@ -383,7 +396,9 @@ def stream_chatgpt_response(
         ) as client:
             wire = _wire_client(client)
 
-            def request(history: History, sender: EventSender, subagent: bool) -> tuple[History, bool] | None:
+            def request(
+                history: History, sender: EventSender, subagent: bool
+            ) -> tuple[History, bool] | None:
                 completed = _request_response(
                     wire,
                     model,
@@ -392,7 +407,7 @@ def stream_chatgpt_response(
                     cancel_event,
                     compact_threshold=compact_threshold,
                     compact_only=compact_only,
-                    subagent=subagent
+                    subagent=subagent,
                 )
                 if completed is None:
                     return None
@@ -414,7 +429,12 @@ def stream_chatgpt_response(
                 return items, has_text
 
             history = run_agent_turn(
-                request, messages, send, cancel_event, compact_only=compact_only
+                request,
+                messages,
+                send,
+                cancel_event,
+                compact_only=compact_only,
+                subagent_sender=subagent_send,
             )
 
             if history is None and not compact_only:

@@ -7,6 +7,8 @@ from vin.provider.events import EventSender
 
 type RequestFn = Callable[[History, EventSender, bool], tuple[History, bool] | None]
 
+type SubagentSender = Callable[[str], EventSender]
+
 
 class AgentError(RuntimeError):
     pass
@@ -111,6 +113,7 @@ def run_agent_turn(
     subagent: bool = False,
     max_requests: int = 16,
     subagent_budget: int = 8,
+    subagent_sender: SubagentSender | None = None,
 ) -> History | None:
     history = list(inputs)
 
@@ -187,19 +190,24 @@ def run_agent_turn(
             ):
                 raise AgentError("ChatGPT returned invalid response output.")
 
-            send(
-                "tool_started",
-                {
-                    "name": name,
-                    "detail": tool_detail(name, arguments),
-                },
-            )
-
             if name == "task" and not subagent:
                 result = run_task(
-                    request, arguments, send, cancel_event, subagent_budget
+                    request,
+                    call_id,
+                    arguments,
+                    send,
+                    cancel_event,
+                    subagent_budget,
+                    subagent_sender,
                 )
             else:
+                send(
+                    "tool_started",
+                    {
+                        "name": name,
+                        "detail": tool_detail(name, arguments),
+                    },
+                )
                 result = execute_tool(name, arguments, cancel_event, send)
 
             if cancel_event.is_set():
@@ -233,10 +241,12 @@ def final_answer(history: History) -> str:
 
 def run_task(
     request: RequestFn,
+    call_id: str,
     arguments: str,
     send: EventSender,
     cancel_event: Event,
     budget: int,
+    subagent_sender: SubagentSender | None,
 ) -> str:
     from vin.tools import truncate_output
 
@@ -248,18 +258,35 @@ def run_task(
     description = payload.get("description") if is_record(payload) else None
     prompt = payload.get("prompt") if is_record(payload) else None
 
-    if not isinstance(description, str) or not isinstance(prompt, str) or not prompt.strip():
+    if (
+        not isinstance(description, str)
+        or not isinstance(prompt, str)
+        or not prompt.strip()
+    ):
+        send("tool_started", {"name": "task", "detail": tool_detail("task", arguments)})
         send("tool_failed", "task")
         return "Error: task needs a description and a prompt."
 
+    send(
+        "tool_started",
+        {
+            "name": "task",
+            "detail": tool_detail("task", arguments),
+            "task_id": call_id,
+            "prompt": prompt,
+        },
+    )
+
     def quiet(_kind: str, _value: object) -> None:
         return
+
+    child = subagent_sender(call_id) if subagent_sender is not None else quiet
 
     try:
         history = run_agent_turn(
             request,
             [{"role": "user", "content": prompt}],
-            quiet,
+            child,
             cancel_event,
             subagent=True,
             max_requests=budget,

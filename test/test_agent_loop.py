@@ -199,6 +199,10 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assert_subset({'type': 'function_call_output', 'call_id': 'call_task', 'output': 'Found it'},
                            resumed['input'][-1])
         self.assertNotIn(('text', 'Found it'), events)
+        self.assertIn(('subagent', {'task_id': 'call_task', 'event': ('text', 'Found it')}), events)
+        started = next(value for kind, value in events if kind == 'tool_started')
+        self.assertEqual(started, {'name': 'task', 'detail': 'Find sessions', 'task_id': 'call_task',
+                                   'prompt': 'Find where sessions are saved.'})
         self.assertIn(('text', 'Done'), events)
         self.assertEqual(self.executions, [])
 

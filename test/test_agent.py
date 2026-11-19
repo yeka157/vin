@@ -58,6 +58,10 @@ READ_CALL: History = [{"type": "function_call", "call_id": "call_read", "name": 
                        "arguments": '{"path":"f"}', "status": "completed"}]
 
 
+STARTED: ToolStarted = {"name": "task", "detail": "Find sessions", "task_id": "call_task",
+                        "prompt": "Find where sessions are saved."}
+
+
 class TaskToolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.cancel = Event()
@@ -73,6 +77,7 @@ class TaskToolTests(unittest.TestCase):
         parent: list[tuple[History, bool]],
         child: Callable[[History, EventSender], tuple[History, bool] | None],
         subagent_budget: int | None = None,
+        subagent_sender: agent.SubagentSender | None = None,
     ) -> History | None:
         replies = iter(parent)
 
@@ -85,8 +90,9 @@ class TaskToolTests(unittest.TestCase):
 
         user: History = [{"role": "user", "content": "Delegate it."}]
         if subagent_budget is None:
-            return agent.run_agent_turn(request, user, self.send, self.cancel)
-        return agent.run_agent_turn(request, user, self.send, self.cancel, subagent_budget=subagent_budget)
+            return agent.run_agent_turn(request, user, self.send, self.cancel, subagent_sender=subagent_sender)
+        return agent.run_agent_turn(request, user, self.send, self.cancel, subagent_budget=subagent_budget,
+                                    subagent_sender=subagent_sender)
 
     def task_output(self) -> object:
         return self.parent_seen[-1][-1].get("output")
@@ -104,9 +110,26 @@ class TaskToolTests(unittest.TestCase):
         self.assertEqual([item.get("type") for item in history],
                          [None, "function_call", "function_call_output", "message"])
         self.assertEqual(self.sent, [
-            ("tool_started", {"name": "task", "detail": "Find sessions"}),
+            ("tool_started", STARTED),
             ("tool_finished", "task"),
         ])
+
+    def test_subagent_events_go_to_the_sender_made_for_its_task(self) -> None:
+        tagged: list[tuple[str, str, object]] = []
+
+        def subagent_sender(task_id: str) -> EventSender:
+            def child_send(kind: str, value: object) -> None:
+                tagged.append((task_id, kind, value))
+            return child_send
+
+        def child(_history: History, sender: EventSender) -> tuple[History, bool]:
+            sender("text", "Found it")
+            return answer("Found it"), True
+
+        self.run_turn([(task_call(), False), (answer("Done"), True)], child, subagent_sender=subagent_sender)
+
+        self.assertEqual(tagged, [("call_task", "text", "Found it")])
+        self.assertEqual(self.sent, [("tool_started", STARTED), ("tool_finished", "task")])
 
     def test_request_budget_defaults_to_eight_and_failure_lets_the_parent_continue(self) -> None:
         for budget, expected in ((None, 8), (2, 2)):
@@ -133,7 +156,8 @@ class TaskToolTests(unittest.TestCase):
 
                 self.assertEqual(self.child_seen, [])
                 self.assertEqual(self.task_output(), "Error: task needs a description and a prompt.")
-                self.assertEqual(self.sent[-1], ("tool_failed", "task"))
+                self.assertEqual([kind for kind, _ in self.sent], ["tool_started", "tool_failed"])
+                self.assertEqual(self.sent[0], ("tool_started", {"name": "task", "detail": agent.tool_detail("task", arguments)}))
 
     def test_a_subagent_cannot_start_another_subagent(self) -> None:
         replies = iter([(task_call(), False), (answer("Could not delegate."), True)])
@@ -153,7 +177,7 @@ class TaskToolTests(unittest.TestCase):
 
         self.assertIsNone(history)
         self.assertEqual(len(self.parent_seen), 1)
-        self.assertEqual(self.sent, [("tool_started", {"name": "task", "detail": "Find sessions"})])
+        self.assertEqual(self.sent, [("tool_started", STARTED)])
 
     def test_provider_errors_inside_a_subagent_end_the_parent_turn(self) -> None:
         def child(_history: History, _sender: EventSender) -> None:

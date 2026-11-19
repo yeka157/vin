@@ -1,6 +1,6 @@
 from queue import SimpleQueue
 from threading import Event
-from typing import Literal, Protocol, TypedDict, overload
+from typing import Literal, NotRequired, Protocol, TypedDict, overload
 
 from vin.types import History
 
@@ -14,6 +14,8 @@ class TokenUsage(TypedDict):
 class ToolStarted(TypedDict):
     name: str
     detail: str
+    task_id: NotRequired[str]
+    prompt: NotRequired[str]
 
 
 type TextEventKind = Literal["text", "tool_diff", "error", "rate_limit"]
@@ -23,6 +25,7 @@ type ReplyEvent = (
     | tuple[ToolEventKind, ToolStarted | str]
     | tuple[Literal["usage"], TokenUsage]
     | tuple[Literal["complete"], History | None]
+    | tuple[Literal["subagent"], SubagentEvent]
 )
 
 
@@ -35,6 +38,11 @@ class EventSender(Protocol):
     def __call__(self, kind: Literal["usage"], value: TokenUsage, /) -> None: ...
     @overload
     def __call__(self, kind: Literal["complete"], value: History | None, /) -> None: ...
+
+
+class SubagentEvent(TypedDict):
+    task_id: str
+    event: ReplyEvent
 
 
 class ReplyEvents(SimpleQueue[ReplyEvent]):
