@@ -147,6 +147,15 @@ class Subagent(TypedDict):
     transcript: list[TranscriptEntry]
 
 
+class SavedSubagent(TypedDict):
+    id: str
+    description: str
+    status: Literal["running", "finished", "failed", "interrupted"]
+    duration: float | None
+    tokens: int
+    transcript: list[EncodedEntry]
+
+
 class SavedSpan(TypedDict):
     start: int
     end: int
@@ -175,6 +184,7 @@ class SessionRecord(TypedDict):
     messages: History
     transcript: list[EncodedEntry]
     active_turn: ActiveTurn | None
+    subagents: NotRequired[list[SavedSubagent]]
 
 
 type ExternalRecord = Mapping[str, object]

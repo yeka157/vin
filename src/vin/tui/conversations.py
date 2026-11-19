@@ -10,6 +10,7 @@ from rich.text import Text
 from vin.sessions.records import snapshot_session
 from vin.sessions.recovery import restore_session
 from vin.sessions.storage import list_sessions, load_session, save_session
+from vin.tui.subagents import restore_subagents
 
 if TYPE_CHECKING:
     from vin.tui.app import VinApp
@@ -36,6 +37,7 @@ def checkpoint_session(owner: "VinApp", *, force: bool = False) -> bool:
             owner.messages,
             owner.transcript,
             active_turn=owner.active_turn,
+            subagents=owner.subagents,
         )
 
         save_session(
@@ -103,6 +105,7 @@ async def resume_conversation(owner: "VinApp", query: str | None = None) -> str 
     owner.messages = messages
     owner.last_usage = None
     owner.transcript = transcript
+    owner.subagents = restore_subagents(record)
     owner.session_record = deepcopy(record)
     owner.saved_session_record = deepcopy(record)
     owner.active_turn = None

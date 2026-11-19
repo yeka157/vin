@@ -1,8 +1,10 @@
+from copy import deepcopy
 from time import monotonic
-from typing import Literal
+from typing import Literal, cast
 from rich.text import Text
 from vin.provider.events import ReplyEvent
-from vin.types import Subagent
+from vin.sessions.transcript import decode_transcript
+from vin.types import SessionRecord, Subagent, TranscriptEntry
 
 
 def apply_subagent_event(subagent: Subagent, event: ReplyEvent) -> None:
@@ -68,3 +70,26 @@ def finish_subagent(
                 label = entry.get("label", entry["name"])
                 entry["status"] = "interrupted"
                 entry["content"] = Text(f"● {label} · interrupted", style="yellow")
+
+
+def restore_subagents(record: SessionRecord) -> list[Subagent]:
+    restored: list[Subagent] = []
+    for item in record.get("subagents", []):
+        transcript = cast(
+            list[TranscriptEntry], decode_transcript(deepcopy(item["transcript"]))
+        )
+        subagent: Subagent = {
+            "id": item["id"],
+            "description": item["description"],
+            "status": item["status"],
+            "duration": item["duration"],
+            "tokens": item["tokens"],
+            "started_at": 0.0,
+            "transcript": transcript,
+        }
+
+        if subagent["status"] == "running":
+            finish_subagent(subagent, "interrupted")
+            subagent["duration"] = item["duration"]
+        restored.append(subagent)
+    return restored

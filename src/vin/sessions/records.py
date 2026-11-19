@@ -1,5 +1,15 @@
+from collections.abc import Sequence
 from typing import cast
-from vin.types import ActiveTurn, History, Pathish, SessionRecord, TranscriptEntry, is_dictionary, is_list
+from vin.types import (
+    ActiveTurn,
+    History,
+    Pathish,
+    SessionRecord,
+    Subagent,
+    TranscriptEntry,
+    is_dictionary,
+    is_list,
+)
 
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -76,9 +86,7 @@ def validate_session(record: object, project_dir: Pathish) -> None:
         raise ValueError("Session update time precedes creation time.")
 
     messages = record.get("messages")
-    if not is_list(messages) or any(
-        not is_dictionary(message) for message in messages
-    ):
+    if not is_list(messages) or any(not is_dictionary(message) for message in messages):
         raise ValueError("Invalid session context.")
 
     entries = decode_transcript(record.get("transcript"))
@@ -90,7 +98,10 @@ def validate_session(record: object, project_dir: Pathish) -> None:
             raise ValueError("Invalid saved mesasge content.")
 
         for field in ("streaming", "intermediate", "expanded", "persist", "transient"):
-            if field in entry and type(cast(dict[str, object], entry)[field]) is not bool:
+            if (
+                field in entry
+                and type(cast(dict[str, object], entry)[field]) is not bool
+            ):
                 raise ValueError("Invalid saved entry flag.")
 
         if entry.get("persist") is False or entry.get("transient") is True:
@@ -107,8 +118,32 @@ def validate_session(record: object, project_dir: Pathish) -> None:
             raise ValueError("Invalid saved tool status.")
 
         for field in ("detail", "label", "diff"):
-            if field in entry and not isinstance(cast(dict[str, object], entry)[field], str):
+            if field in entry and not isinstance(
+                cast(dict[str, object], entry)[field], str
+            ):
                 raise ValueError("Invalid saved tool metadata")
+
+    subagents = record.get("subagents", [])
+
+    if not is_list(subagents):
+        raise ValueError("Invalid saved subagents.")
+
+    for item in subagents:
+        if (
+            not is_dictionary(item)
+            or not isinstance(item.get("id"), str)
+            or not isinstance(item.get("description"), str)
+            or item.get("status")
+            not in ("running", "finished", "failed", "interrupted")
+            or type(item.get("tokens")) is not int
+            or (
+                item.get("duration") is not None
+                and type(item.get("duration")) not in (int, float)
+            )
+        ):
+            raise ValueError("Invalid saved subagent.")
+
+        decode_transcript(item.get("transcript"))
 
     if "active_turn" not in record:
         raise ValueError("Missing active turn.")
@@ -132,12 +167,34 @@ def validate_session(record: object, project_dir: Pathish) -> None:
         raise ValueError("Session data cannot be saved as JSON.") from None
 
 
-def snapshot_session(record: SessionRecord, messages: History, transcript: list[TranscriptEntry], *, active_turn: ActiveTurn | None) -> SessionRecord:
+def snapshot_session(
+    record: SessionRecord,
+    messages: History,
+    transcript: list[TranscriptEntry],
+    *,
+    active_turn: ActiveTurn | None,
+    subagents: Sequence[Subagent] = (),
+) -> SessionRecord:
     snapshot = deepcopy(record)
     snapshot["messages"] = deepcopy(messages)
     snapshot["transcript"] = deepcopy(encode_transcript(transcript))
     snapshot["active_turn"] = deepcopy(active_turn)
     snapshot["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    if subagents:
+        snapshot["subagents"] = [
+            {
+                "id": item["id"],
+                "description": item["description"],
+                "status": item["status"],
+                "duration": item["duration"],
+                "tokens": item["tokens"],
+                "transcript": encode_transcript(item["transcript"]),
+            }
+            for item in subagents
+        ]
+    else:
+        snapshot.pop("subagents", None)
 
     validate_session(snapshot, snapshot["project_dir"])
     return snapshot

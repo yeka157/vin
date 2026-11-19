@@ -17,7 +17,7 @@ from vin.sessions.transcript import encode_transcript
 from vin.tui import app, conversations
 from vin.tui.app import VinApp
 from vin.provider.events import TokenUsage
-from vin.types import ActiveTurn, Credentials, History, SessionRecord, TranscriptEntry
+from vin.types import ActiveTurn, Credentials, History, SessionRecord, Subagent, TranscriptEntry
 from session_typing_helpers import present, string_value, text_value
 
 
@@ -224,6 +224,53 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
                    if str(entry["content"]) == "Previous turn was interrupted."]
         self.assertEqual(len(notices), 1)
 
+
+    async def test_resume_restores_saved_subagents_and_later_checkpoints_keep_them(self) -> None:
+        running: Subagent = {
+            "id": "call_running", "description": "Run tests", "status": "running", "started_at": 50.0,
+            "duration": None, "tokens": 40, "transcript": [
+                {"role": "user", "content": "Run the tests."},
+                {"role": "assistant", "content": "Starting", "streaming": False},
+                {"role": "tool", "name": "bash", "label": "bash make test", "status": "running",
+                 "content": Text("● bash make test · running", style="dim")},
+            ]}
+        finished: Subagent = {
+            "id": "call_done", "description": "Find sessions", "status": "finished", "started_at": 10.0,
+            "duration": 4.5, "tokens": 100, "transcript": [{"role": "user", "content": "Find sessions."}]}
+        record = snapshot_session(new_session(self.project, "Delegated work"), [],
+                                  [{"role": "user", "content": "Delegate"}], active_turn=None,
+                                  subagents=[running, finished])
+        storage.save_session(self.project, record)
+        self.picker.side_effect = None
+        self.picker.return_value = record["id"]
+
+        with patch.object(app, "stream_chatgpt_response", side_effect=AssertionError("Resume must not run a provider")):
+            await self.resume()
+
+        restored_running, restored_finished = self.owner.subagents
+        self.assertEqual([(item["id"], item["status"], item["duration"], item["tokens"])
+                          for item in self.owner.subagents],
+                         [("call_running", "interrupted", None, 40), ("call_done", "finished", 4.5, 100)])
+        tool = restored_running["transcript"][2]
+        self.assertEqual(tool.get("status"), "interrupted")
+        self.assertEqual(text_value(tool["content"]).plain, "● bash make test · interrupted")
+        self.assertEqual(restored_finished["transcript"], [{"role": "user", "content": "Find sessions."}])
+
+        self.assertTrue(self.owner.checkpoint_session(force=True))
+        saved = present(storage.load_session(self.project, record["id"]))
+        self.assertEqual([(item["id"], item["status"]) for item in saved.get("subagents", [])],
+                         [("call_running", "interrupted"), ("call_done", "finished")])
+
+    async def test_resuming_an_older_session_clears_subagents_from_the_previous_one(self) -> None:
+        record = self.save_restorable_record()
+        self.owner.subagents = [{"id": "stale", "description": "x", "status": "finished", "started_at": 0.0,
+                                 "duration": 1.0, "tokens": 0, "transcript": []}]
+
+        with patch.object(app, "stream_chatgpt_response", side_effect=AssertionError("Resume must not run a provider")):
+            await self.resume()
+
+        self.assertEqual(self.owner.subagents, [])
+        self.assertNotIn("subagents", present(storage.load_session(self.project, record["id"])))
 
     async def test_exact_title_and_full_id_resume_directly_without_opening_picker(self) -> None:
         record = self.save_restorable_record()

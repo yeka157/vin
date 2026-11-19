@@ -5,11 +5,12 @@ from copy import deepcopy
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 import unittest
 from uuid import UUID
 
 from vin.sessions.records import new_session, validate_session, snapshot_session
-from vin.types import ActiveTurn, History, Pathish, SessionRecord, TranscriptEntry
+from vin.types import ActiveTurn, History, Pathish, SessionRecord, Subagent, TranscriptEntry
 from session_typing_helpers import list_value, record_value
 from rich.markdown import Markdown
 
@@ -186,3 +187,59 @@ class SessionSnapshotTests(unittest.TestCase):
         snapshot_nested = list_value(snapshot_metadata["nested"])
         snapshot_nested.append("snapshot only")
         self.assertEqual(nested, ["original", "later"])
+
+
+class SavedSubagentRecordTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.project = Path(temporary.name)
+        self.record = new_session(self.project, "Delegate it")
+
+    def subagent(self) -> Subagent:
+        from rich.text import Text
+
+        return {"id": "call_task", "description": "Find sessions", "status": "finished", "started_at": 12.0,
+                "duration": 4.5, "tokens": 100, "transcript": [
+                    {"role": "user", "content": "Find where sessions are saved."},
+                    {"role": "tool", "name": "read", "label": "read storage.py", "status": "finished",
+                     "content": Text("● read storage.py · finished", style="dim")},
+                ]}
+
+    def test_snapshot_saves_subagents_without_their_clock_and_drops_the_key_when_empty(self) -> None:
+        saved = snapshot_session(self.record, [], [], active_turn=None, subagents=[self.subagent()])
+
+        item, = saved.get("subagents", [])
+        self.assertEqual({key: value for key, value in item.items() if key != "transcript"},
+                         {"id": "call_task", "description": "Find sessions", "status": "finished",
+                          "duration": 4.5, "tokens": 100})
+        self.assertEqual(item["transcript"][1]["content"], {"type": "rich_text", "text": "● read storage.py · finished",
+                                                           "style": "dim", "spans": []})
+        json.dumps(saved, allow_nan=False)
+
+        emptied = snapshot_session(saved, [], [], active_turn=None)
+        self.assertNotIn("subagents", emptied)
+        self.assertNotIn("subagents", snapshot_session(self.record, [], [], active_turn=None))
+
+    def test_sessions_without_subagents_stay_valid(self) -> None:
+        validate_session(self.record, self.project)
+
+    def test_invalid_saved_subagents_are_rejected(self) -> None:
+        saved = snapshot_session(self.record, [], [], active_turn=None, subagents=[self.subagent()])
+        good = record_value(cast(object, json.loads(json.dumps(saved.get("subagents", [])[0]))))
+        cases: dict[str, object] = {
+            "not a list": {"id": "x"},
+            "not a record": ["x"],
+            "missing id": [{key: value for key, value in good.items() if key != "id"}],
+            "description not text": [dict(good, description=1)],
+            "unknown status": [dict(good, status="paused")],
+            "tokens are a bool": [dict(good, tokens=True)],
+            "duration is text": [dict(good, duration="4s")],
+            "broken transcript": [dict(good, transcript=[{"role": "robot", "content": "x"}])],
+        }
+        for label, subagents in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(ValueError):
+                    validate_session(dict(deepcopy(self.record), subagents=subagents), self.project)
+        validate_session(dict(deepcopy(self.record), subagents=[dict(good, duration=None), dict(good, duration=3)]),
+                         self.project)
