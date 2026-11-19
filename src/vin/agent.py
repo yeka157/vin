@@ -2,10 +2,10 @@ from threading import Event
 import json
 import re
 from typing import Callable, cast
-from vin.types import History, is_record
+from vin.types import History, is_record, is_list
 from vin.provider.events import EventSender
 
-type RequestFn = Callable[[History], tuple[History, bool] | None]
+type RequestFn = Callable[[History, EventSender, bool], tuple[History, bool] | None]
 
 
 class AgentError(RuntimeError):
@@ -26,6 +26,7 @@ def tool_detail(name: str, arguments: str) -> str:
         "write": "path",
         "edit": "path",
         "bash": "command",
+        "task": "description",
     }
 
     key = keys.get(name)
@@ -107,14 +108,17 @@ def run_agent_turn(
     cancel_event: Event,
     *,
     compact_only: bool = False,
+    subagent: bool = False,
+    max_requests: int = 16,
+    subagent_budget: int = 8,
 ) -> History | None:
     history = list(inputs)
 
-    for _ in range(16):
+    for _ in range(max_requests):
         if cancel_event.is_set():
             return None
 
-        completed = request(history)
+        completed = request(history, send, subagent)
 
         if completed is None:
             return None
@@ -146,9 +150,15 @@ def run_agent_turn(
             if not has_text:
                 types = sorted(
                     {
-                        "message" if item.get("type") == "message" else
-                        "reasoning" if item.get("type") == "reasoning" else
-                        "other"
+                        (
+                            "message"
+                            if item.get("type") == "message"
+                            else (
+                                "reasoning"
+                                if item.get("type") == "reasoning"
+                                else "other"
+                            )
+                        )
                         for item in output
                     }
                 )
@@ -164,9 +174,17 @@ def run_agent_turn(
             if cancel_event.is_set():
                 return None
 
-            name, arguments, call_id = call.get("name"), call.get("arguments"), call.get("call_id")
+            name, arguments, call_id = (
+                call.get("name"),
+                call.get("arguments"),
+                call.get("call_id"),
+            )
 
-            if not isinstance(name, str) or not isinstance(arguments, str) or not isinstance(call_id, str):
+            if (
+                not isinstance(name, str)
+                or not isinstance(arguments, str)
+                or not isinstance(call_id, str)
+            ):
                 raise AgentError("ChatGPT returned invalid response output.")
 
             send(
@@ -176,7 +194,13 @@ def run_agent_turn(
                     "detail": tool_detail(name, arguments),
                 },
             )
-            result = execute_tool(name, arguments, cancel_event, send)
+
+            if name == "task" and not subagent:
+                result = run_task(
+                    request, arguments, send, cancel_event, subagent_budget
+                )
+            else:
+                result = execute_tool(name, arguments, cancel_event, send)
 
             if cancel_event.is_set():
                 return None
@@ -188,4 +212,63 @@ def run_agent_turn(
                     "output": result,
                 }
             )
-    raise AgentError("Model request limit exceeded: maximum 16.")
+    raise AgentError(f"Model request limit exceeded: maximum {max_requests}.")
+
+
+def final_answer(history: History) -> str:
+    for item in reversed(history):
+        if item.get("type") == "message" and item.get("role") == "assistant":
+            content = item.get("content")
+            if not is_list(content):
+                continue
+            return "".join(
+                text
+                for part in content
+                if is_record(part)
+                and part.get("type") == "output_text"
+                and isinstance(text := part.get("text"), str)
+            )
+    return ""
+
+
+def run_task(
+    request: RequestFn,
+    arguments: str,
+    send: EventSender,
+    cancel_event: Event,
+    budget: int,
+) -> str:
+    from vin.tools import truncate_output
+
+    try:
+        payload = cast(object, json.loads(arguments))
+    except json.JSONDecodeError:
+        payload = None
+
+    description = payload.get("description") if is_record(payload) else None
+    prompt = payload.get("prompt") if is_record(payload) else None
+
+    if not isinstance(description, str) or not isinstance(prompt, str) or not prompt.strip():
+        send("tool_failed", "task")
+        return "Error: task needs a description and a prompt."
+
+    def quiet(_kind: str, _value: object) -> None:
+        return
+
+    try:
+        history = run_agent_turn(
+            request,
+            [{"role": "user", "content": prompt}],
+            quiet,
+            cancel_event,
+            subagent=True,
+            max_requests=budget,
+        )
+    except AgentError as error:
+        send("tool_failed", "task")
+        return f"Error: subagent failed: {error}"
+
+    if history is None:
+        return ""
+    send("tool_finished", "task")
+    return truncate_output(final_answer(history))

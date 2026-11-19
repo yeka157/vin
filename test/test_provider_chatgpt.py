@@ -260,8 +260,8 @@ class StreamingResponseTests(unittest.TestCase):
         self.client.responses.create.assert_called_once()
         self.assertEqual(submitted, {
             "model": "selected-model", "input": original,
-            "instructions": chatgpt.SYSTEM_PROMPT,
-            "tools": response_tools(), "reasoning": {"effort": "medium"},
+            "instructions": chatgpt.SYSTEM_PROMPT + chatgpt.TASK_PROMPT,
+            "tools": response_tools(task=True), "reasoning": {"effort": "medium"},
             "include": ["reasoning.encrypted_content"],
             "store": False, "stream": True,
         })

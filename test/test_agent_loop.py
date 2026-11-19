@@ -167,7 +167,7 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assertNotIn('context_management', request)
         self.assertIn('reasoning.encrypted_content', request['include'])
         schemas = request['tools']
-        self.assertEqual({item['name'] for item in schemas}, {'read', 'write', 'edit', 'bash'})
+        self.assertEqual({item['name'] for item in schemas}, {'read', 'write', 'edit', 'bash', 'task'})
         for schema in schemas:
             self.assertEqual(schema['type'], 'function')
             self.assertIs(schema['strict'], False)
@@ -180,6 +180,27 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assertNotIn('offset', required)
         self.assertNotIn('limit', required)
         self.assertEqual(self.input, [{'role': 'user', 'content': 'Inspect the workspace.'}])
+
+    def test_subagent_request_uses_its_own_prompt_tools_and_input(self) -> None:
+        from vin.provider import chatgpt
+        arguments = '{"description":"Find sessions","prompt":"Find where sessions are saved."}'
+        events = self.run_stream([
+            [completed([call('task', arguments, 'call_task')])],
+            [delta('Found it'), completed([message('Found it')])],
+            [delta(), completed([message()])],
+        ])
+
+        parent, child, resumed = self.requests
+        self.assertEqual(parent['instructions'], chatgpt.SYSTEM_PROMPT + chatgpt.TASK_PROMPT)
+        self.assertEqual(child['instructions'], chatgpt.SYSTEM_PROMPT + chatgpt.SUBAGENT_PROMPT)
+        self.assertIn('task', {item['name'] for item in parent['tools']})
+        self.assertEqual({item['name'] for item in child['tools']}, {'read', 'write', 'edit', 'bash'})
+        self.assertEqual(child['input'], [{'role': 'user', 'content': 'Find where sessions are saved.'}])
+        self.assert_subset({'type': 'function_call_output', 'call_id': 'call_task', 'output': 'Found it'},
+                           resumed['input'][-1])
+        self.assertNotIn(('text', 'Found it'), events)
+        self.assertIn(('text', 'Done'), events)
+        self.assertEqual(self.executions, [])
 
     def test_compaction_threshold_is_forwarded_to_every_model_request(self) -> None:
         events = self.run_stream([

@@ -407,7 +407,7 @@ def bash(command: str, timeout: int = 30) -> str:
 TOOL_REGISTRY = Tools([read, write, edit, bash])
 
 
-def response_tools() -> list[FunctionToolParam]:
+def response_tools(*, task: bool = False) -> list[FunctionToolParam]:
     schemas: list[FunctionToolParam] = []
 
     for tool in TOOL_REGISTRY.tools():
@@ -417,6 +417,30 @@ def response_tools() -> list[FunctionToolParam]:
                 "type": "function",
                 **function,
                 "strict": False,
+            }
+        )
+
+    if task:
+        schemas.append(
+            {
+                "type": "function",
+                "name": "task",
+                "strict": False,
+                "description": "Hand a self-contained multi-step job to a subagent with fresh context and get back its final report. The subagent sees only prompt, so include every fact it needs. Do not use it for a single read or edit.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Short label shown to the user.",
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Full instructions for the subagent.",
+                        },
+                    },
+                    "required": ["description", "prompt"],
+                },
             }
         )
 

@@ -107,6 +107,10 @@ SYSTEM_PROMPT = (
     "Never claim a change or successful test without supporting tool results."
 )
 
+TASK_PROMPT = " Use task when the user asks for a subagent, and for self-contained multi-step jobs such as broad searches or implement-and-test. Re-read any file a subagent reports changing before editing it."
+
+SUBAGENT_PROMPT = " You are a subagent working for another agent, not the user, and cannot ask questions. Your final answer must state what you did, every file you changed, the checks you ran with their results, and anything left undone."
+
 
 def list_chatgpt_models(credentials: object) -> list[ModelMetadata]:
     if not is_record(credentials) or not credentials:
@@ -180,6 +184,7 @@ def _request_response(
     *,
     compact_threshold: int | None = None,
     compact_only: bool = False,
+    subagent: bool = False,
 ) -> tuple["Response", bool] | None:
     from vin.tools import response_tools
 
@@ -202,8 +207,16 @@ def _request_response(
     with client.responses.create(
         model=model,
         input=inputs,
-        instructions=COMPACTION_PROMPT if compact_only else SYSTEM_PROMPT,
-        tools=[] if compact_only else response_tools(),
+        instructions=(
+            COMPACTION_PROMPT
+            if compact_only
+            else (
+                SYSTEM_PROMPT + SUBAGENT_PROMPT
+                if subagent
+                else SYSTEM_PROMPT + TASK_PROMPT
+            )
+        ),
+        tools=[] if compact_only else response_tools(task=not subagent),
         reasoning={"effort": "medium"},
         include=["reasoning.encrypted_content"],
         store=False,
@@ -370,15 +383,16 @@ def stream_chatgpt_response(
         ) as client:
             wire = _wire_client(client)
 
-            def request(history: History) -> tuple[History, bool] | None:
+            def request(history: History, sender: EventSender, subagent: bool) -> tuple[History, bool] | None:
                 completed = _request_response(
                     wire,
                     model,
                     history,
-                    send,
+                    sender,
                     cancel_event,
                     compact_threshold=compact_threshold,
                     compact_only=compact_only,
+                    subagent=subagent
                 )
                 if completed is None:
                     return None
@@ -400,11 +414,7 @@ def stream_chatgpt_response(
                 return items, has_text
 
             history = run_agent_turn(
-                request,
-                messages,
-                send,
-                cancel_event,
-                compact_only=compact_only
+                request, messages, send, cancel_event, compact_only=compact_only
             )
 
             if history is None and not compact_only:
