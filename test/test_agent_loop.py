@@ -182,7 +182,7 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assertEqual(self.input, [{'role': 'user', 'content': 'Inspect the workspace.'}])
 
     def test_subagent_request_uses_its_own_prompt_tools_and_input(self) -> None:
-        from vin.provider import chatgpt
+        from vin.provider import prompts
         arguments = '{"description":"Find sessions","prompt":"Find where sessions are saved."}'
         events = self.run_stream([
             [completed([call('task', arguments, 'call_task')])],
@@ -191,8 +191,8 @@ class AgentLoopHTTPTests(unittest.TestCase):
         ])
 
         parent, child, resumed = self.requests
-        self.assertEqual(parent['instructions'], chatgpt.SYSTEM_PROMPT + chatgpt.TASK_PROMPT)
-        self.assertEqual(child['instructions'], chatgpt.SYSTEM_PROMPT + chatgpt.SUBAGENT_PROMPT)
+        self.assertEqual(parent['instructions'], prompts.SYSTEM_PROMPT + prompts.TASK_PROMPT)
+        self.assertEqual(child['instructions'], prompts.SYSTEM_PROMPT + prompts.SUBAGENT_PROMPT)
         self.assertIn('task', {item['name'] for item in parent['tools']})
         self.assertEqual({item['name'] for item in child['tools']}, {'read', 'write', 'edit', 'bash'})
         self.assertEqual(child['input'], [{'role': 'user', 'content': 'Find where sessions are saved.'}])

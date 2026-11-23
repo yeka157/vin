@@ -74,6 +74,21 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.owner.session.default_buffer.document, self.draft)
 
 
+    async def test_openrouter_turn_uses_the_saved_key_without_a_chatgpt_refresh(self) -> None:
+        seen: list[object] = []
+        def worker(account: object, model: str | None, messages: History, events: ReplyEvents, cancel_event: Event, **_options: object) -> None:
+            seen.append(account)
+            events.put(("text", "Done"))
+            events.put(("complete", None))
+        self.owner.selected_provider = "openrouter"
+        self.owner.openrouter = {"key": "sk-or-secret", "label": "test"}
+        with patch.object(tui, "stream_openrouter_response", side_effect=worker):
+            await asyncio.wait_for(self.start(), 2)
+        self.assertEqual(seen, [{"key": "sk-or-secret", "label": "test"}])
+        self.assertIsNot(seen[0], self.owner.openrouter)
+        self.exchange.assert_not_called()
+        self.worker.assert_not_called()
+
     async def test_transient_refresh_failure_blocks_chat_without_secrets_or_login_advice(self) -> None:
         self.exchange.side_effect = RuntimeError("old-secret new-refresh-secret")
         await asyncio.wait_for(self.start(), 2)

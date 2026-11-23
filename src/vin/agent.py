@@ -1,13 +1,16 @@
+from contextlib import AbstractContextManager
 from threading import Event
 import json
 import re
-from typing import Callable, cast
+from typing import Callable, Literal, cast
 from vin.types import History, is_record, is_list
 from vin.provider.events import EventSender
 
 type RequestFn = Callable[[History, EventSender, bool], tuple[History, bool] | None]
 
 type SubagentSender = Callable[[str], EventSender]
+
+type ErrorMessage = Callable[[Exception], tuple[Literal["error", "rate_limit"], str]]
 
 
 class AgentError(RuntimeError):
@@ -167,7 +170,7 @@ def run_agent_turn(
                     }
                 )
                 raise AgentError(
-                    "ChatGPT returned an empty response "
+                    "The model returned an empty response "
                     f"(status=completed; output={','.join(types) or 'none'}). "
                     "Please try again."
                 )
@@ -189,7 +192,7 @@ def run_agent_turn(
                 or not isinstance(arguments, str)
                 or not isinstance(call_id, str)
             ):
-                raise AgentError("ChatGPT returned invalid response output.")
+                raise AgentError("The model returned invalid response output.")
 
             if name == "task" and subagents and not subagent:
                 result = run_task(
@@ -222,6 +225,43 @@ def run_agent_turn(
                 }
             )
     raise AgentError(f"Model request limit exceeded: maximum {max_requests}.")
+
+
+def run_reply(
+    client: AbstractContextManager[object],
+    request: RequestFn,
+    messages: History,
+    send: EventSender,
+    subagent_send: SubagentSender,
+    cancel_event: Event,
+    *,
+    error_message: ErrorMessage,
+    compact_only: bool = False,
+    subagents: bool = True,
+    subagent_budget: int = 8,
+) -> None:
+    try:
+        with client:
+            history = run_agent_turn(
+                request,
+                messages,
+                send,
+                cancel_event,
+                compact_only=compact_only,
+                subagent_sender=subagent_send,
+                subagents=subagents,
+                subagent_budget=subagent_budget,
+            )
+    except AgentError as error:
+        send("error", str(error))
+        return
+    except Exception as error:
+        kind, text = error_message(error)
+        send(kind, text)
+        return
+    if history is None and not compact_only:
+        return
+    send("complete", history)
 
 
 def final_answer(history: History) -> str:

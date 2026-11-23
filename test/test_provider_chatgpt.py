@@ -26,7 +26,8 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
 )
 
-from vin.provider import chatgpt
+from vin import agent
+from vin.provider import chatgpt, prompts
 from vin.provider.events import ReplyEvent, ReplyEvents
 from vin.types import History, JSONValue
 from provider_typing_helpers import ClientDouble, RequestSnapshot, REQUEST_ADAPTER, credentials as fixture_credentials
@@ -260,7 +261,7 @@ class StreamingResponseTests(unittest.TestCase):
         self.client.responses.create.assert_called_once()
         self.assertEqual(submitted, {
             "model": "selected-model", "input": original,
-            "instructions": chatgpt.SYSTEM_PROMPT + chatgpt.TASK_PROMPT,
+            "instructions": prompts.SYSTEM_PROMPT + prompts.TASK_PROMPT,
             "tools": response_tools(task=True), "reasoning": {"effort": "medium"},
             "include": ["reasoning.encrypted_content"],
             "store": False, "stream": True,
@@ -277,12 +278,12 @@ class StreamingResponseTests(unittest.TestCase):
 
         from vin.tools import response_tools
         request, = submitted
-        self.assertEqual(request["instructions"], chatgpt.SYSTEM_PROMPT)
+        self.assertEqual(request["instructions"], prompts.SYSTEM_PROMPT)
         self.assertEqual(request["tools"], response_tools())
         self.assertNotIn("task", [tool["name"] for tool in request["tools"]])
 
     def test_subagent_settings_reach_the_agent_loop(self) -> None:
-        with patch.object(chatgpt, "run_agent_turn", return_value=None) as turn:
+        with patch.object(agent, "run_agent_turn", return_value=None) as turn:
             self.invoke(subagents=False, subagent_budget=3)
 
         options = cast(dict[str, object], turn.call_args.kwargs)

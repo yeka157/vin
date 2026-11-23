@@ -39,6 +39,7 @@ from vin.auth.openrouter import (
     save_openrouter_account,
 )
 from vin.provider.chatgpt import list_chatgpt_models, stream_chatgpt_response
+from vin.provider.openrouter import stream_openrouter_response
 from vin.provider.model_cache import (
     load_cached_chatgpt_models,
     save_cached_chatgpt_models,
@@ -462,16 +463,22 @@ class VinApp:
                 )
                 completed = True
                 return
-            try:
-                credentials = await self.prepare_request_credentials()
-            except Exception as error:
-                message = "Could not refresh ChatGPT sign-in. Please try again."
-                if isinstance(error, TokenExchangeError) and error.requires_login:
-                    message = "ChatGPT sign-in has expired. Sign in again with /login."
-                self.transcript.append(
-                    {"role": "notice", "content": Text(message, style="red")}
-                )
-                return "error"
+            credentials: AccountRecord | OpenRouterAccount | None
+            if self.selected_provider == "openrouter":
+                credentials = self.openrouter
+            else:
+                try:
+                    credentials = await self.prepare_request_credentials()
+                except Exception as error:
+                    message = "Could not refresh ChatGPT sign-in. Please try again."
+                    if isinstance(error, TokenExchangeError) and error.requires_login:
+                        message = (
+                            "ChatGPT sign-in has expired. Sign in again with /login."
+                        )
+                    self.transcript.append(
+                        {"role": "notice", "content": Text(message, style="red")}
+                    )
+                    return "error"
 
             compact_threshold: int | None = None
             for model in self.models:
@@ -506,7 +513,11 @@ class VinApp:
                 options["subagent_budget"] = self.subagent_settings["budget"]
 
             Thread(
-                target=stream_chatgpt_response,
+                target=(
+                    stream_openrouter_response
+                    if self.selected_provider == "openrouter"
+                    else stream_chatgpt_response
+                ),
                 args=(
                     (credentials or {}).copy(),
                     self.selected_model,
