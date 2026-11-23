@@ -1,6 +1,6 @@
 """Provider labels and recognized terminal commands."""
 
-PROVIDER_LABELS = {"chatgpt": "ChatGPT"}
+PROVIDER_LABELS = {"chatgpt": "ChatGPT", "openrouter": "OpenRouter"}
 COMMANDS = {
     "/help",
     "/user",

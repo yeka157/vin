@@ -189,7 +189,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
         self.owner.credentials = fixture_credentials("fake-access-token")
         self.owner.selected_model = "selected-model"
         self.owner.models = [{
-            "slug": "selected-model", "display_name": "Selected Model", "context_window": 500000,
+            "slug": "selected-model", "display_name": "Selected Model", "provider": "chatgpt", "context_window": 500000,
         }]
         self.owner.messages = [
             {"role": "user", "content": "Earlier question"},
@@ -439,7 +439,7 @@ class ChatFlowTests(unittest.TestCase):
             refresh_credentials=preserve_credentials,
             logout_chatgpt=sign_out_registration,
             patch_stdout=Mock(return_value=nullcontext()),
-            list_chatgpt_models=Mock(return_value=[{"slug": "test-model", "display_name": "Test Model"}]),
+            list_chatgpt_models=Mock(return_value=[{"slug": "test-model", "display_name": "Test Model", "provider": "chatgpt"}]),
             choose_chatgpt_model=Mock(return_value="test-model"),
             load_model_preference=lambda: None,
             save_model_preference=Mock(),
@@ -480,8 +480,8 @@ class InitialModelTests(unittest.TestCase):
         self.app = vin.VinApp()
         self.credentials: Credentials | None = fixture_credentials()
         self.models: list[ModelMetadata] = [
-            {"slug": "old-model", "display_name": "Old Model"},
-            {"slug": "new-model", "display_name": "New Model"},
+            {"slug": "old-model", "display_name": "Old Model", "provider": "chatgpt"},
+            {"slug": "new-model", "display_name": "New Model", "provider": "chatgpt"},
         ]
         self.app.credentials = self.credentials
         self.app.models = [self.models[0]]
@@ -579,8 +579,8 @@ class ModelCommandTests(unittest.TestCase):
         self.credentials: Credentials | None = fixture_credentials()
         self.signed_in = fixture_credentials("fake-new-token", "new-fake-account")
         self.models: list[ModelMetadata] = [
-            {"slug": "old-model", "display_name": "Old Model"},
-            {"slug": "new-model", "display_name": "New Model"},
+            {"slug": "old-model", "display_name": "Old Model", "provider": "chatgpt"},
+            {"slug": "new-model", "display_name": "New Model", "provider": "chatgpt"},
         ]
         self.session = PromptSession[str](input=DummyInput(), output=DummyOutput())
         self.factory = Mock(
@@ -1094,7 +1094,7 @@ class ModelCommandTests(unittest.TestCase):
         self.run_chat(["/quit"])
 
         self.assertEqual(self.inline.await_args_list, [
-            call("Sign in to Vin", [("chatgpt", "Sign in with ChatGPT")]),
+            call("Sign in to Vin", [("chatgpt", "Sign in with ChatGPT"), ("openrouter", "Use an OpenRouter API key")]),
             call(
                 "Choose a ChatGPT model",
                 [("old-model", "Old Model"), ("new-model", "New Model")],

@@ -32,6 +32,12 @@ from vin.auth.chatgpt import (
     refresh_credentials,
 )
 from vin.auth.credentials import load_active_session
+from vin.auth.openrouter import (
+    check_openrouter_key,
+    delete_openrouter_account,
+    load_openrouter_account,
+    save_openrouter_account,
+)
 from vin.provider.chatgpt import list_chatgpt_models, stream_chatgpt_response
 from vin.provider.model_cache import (
     load_cached_chatgpt_models,
@@ -57,6 +63,8 @@ from vin.types import (
     ActiveTurn,
     AssistantEntry,
     Credentials,
+    OpenRouterAccount,
+    Provider,
     Registration,
     History,
     ModelMetadata,
@@ -167,7 +175,7 @@ def get_chatgpt_model_preference(
     transcript: list[TranscriptEntry], models: Sequence[ModelMetadata]
 ) -> ModelPreference | None:
     preference = load_model_preference()
-    if preference is None:
+    if preference is None or preference["provider"] != "chatgpt":
         return None
 
     if any(model["slug"] == preference["model"] for model in models):
@@ -201,7 +209,7 @@ class VinApp:
     def __init__(self) -> None:
         self.credentials: AccountRecord | None = None
         self.models: list[ModelMetadata] = []
-        self.selected_provider: Literal["chatgpt"] | None = None
+        self.selected_provider: Provider | None = None
         self.selected_model: str | None = None
         self.messages: History = []
         self.transcript: list[TranscriptEntry] = []
@@ -238,6 +246,49 @@ class VinApp:
         self.panel_start = 0
         self.panel_index: int | None = None
         self.subagent_settings: SubagentSettings = DEFAULT_SUBAGENT_SETTINGS.copy()
+        self.openrouter: OpenRouterAccount | None = None
+        self.secret_future: asyncio.Future[str] | None = None
+
+    async def ask_secret(self, message: str) -> str:
+        if self.choice_future is not None or self.secret_future is not None:
+            raise RuntimeError("A choice is already open")
+        buffer = self.session.default_buffer
+        draft = buffer.document
+        buffer.reset()
+        self.auth_status = message
+        self.secret_future = asyncio.get_running_loop().create_future()
+        self.app.invalidate()
+        try:
+            return await self.secret_future
+        finally:
+            self.secret_future = None
+            buffer.document = draft
+            self.auth_status = None
+            self.app.invalidate()
+
+    async def sign_in_openrouter(self) -> None:
+        try:
+            key = await self.ask_secret(
+                "Paste your OpenRouter API key · Enter to confirm · Esc to cancel"
+            )
+        except asyncio.CancelledError:
+            if _task_is_cancelling():
+                raise
+            return
+        self.auth_status = "Checking key…"
+        self.app.invalidate()
+        account = await asyncio.to_thread(check_openrouter_key, key)
+        save_openrouter_account(account)
+        self.openrouter = account
+        self.selected_provider = "openrouter"
+        self.selected_model = None
+        self.last_usage = None
+        self.transcript.append(
+            {
+                "role": "notice",
+                "content": f"Signed in to OpenRouter{' · ' + account['label'] if account['label'] else ''}.",
+            }
+        )
 
     def panel_agents(self) -> list[Subagent]:
         return self.subagents[self.panel_start :]
@@ -699,7 +750,7 @@ class VinApp:
             self.app.invalidate()
             try:
                 models = await task
-                self.models = models
+                self.set_models("chatgpt", models)
             except asyncio.CancelledError:
                 if _task_is_cancelling():
                     raise
@@ -739,7 +790,11 @@ class VinApp:
         task = asyncio.create_task(
             self.initialize_session(sign_in=True)
             if text == "/login"
-            else self.sign_out()
+            else (
+                self.sign_out_openrouter()
+                if self.selected_provider == "openrouter"
+                else self.sign_out()
+            )
         )
         self.pending_auth = task
         self.app.invalidate()
@@ -794,10 +849,13 @@ class VinApp:
             raise
         finally:
             if not self.credentials or not self.credentials.get("access_token"):
-                self.models = []
-                self.selected_provider = None
-                self.selected_model = None
-                self.last_usage = None
+                self.set_models("chatgpt", [])
+                if self.selected_provider != "openrouter":
+                    self.selected_provider = (
+                        "openrouter" if self.openrouter is not None else None
+                    )
+                    self.selected_model = None
+                    self.last_usage = None
             self.auth_status = None
             self.app.invalidate()
 
@@ -819,6 +877,25 @@ class VinApp:
 
         if cancelled:
             raise asyncio.CancelledError
+
+    async def sign_out_openrouter(self, *, announce: bool = True) -> None:
+        delete_openrouter_account()
+        self.openrouter = None
+        self.set_models("openrouter", [])
+        if self.selected_provider == "openrouter":
+            self.selected_model = None
+            self.last_usage = None
+            self.selected_provider = (
+                "chatgpt"
+                if self.credentials and self.credentials.get("access_token")
+                else None
+            )
+        if announce:
+            self.transcript.append(
+                {"role": "notice", "content": "Signed out of OpenRouter."}
+            )
+        if self.selected_provider == "chatgpt":
+            await self.load_initial_model()
 
     async def chat_loop(self) -> str:
 
@@ -1018,16 +1095,18 @@ class VinApp:
                 "- `/compact` - Compact the conversation context\n"
                 "- `/settings` - Manage settings\n"
                 "- `/tasks` - View tasks from this conversation\n"
-                "- `/login` - Sign in with ChatGPT Subscription\n"
+                "- `/login` - Sign in with ChatGPT or an OpenRouter API key\n"
                 "- `/logout` - Sign out\n"
                 "- `/quit` or `/exit` - leave Vin"
             )
         elif text == "/user":
+            lines: list[str] = []
             if self.credentials and self.credentials.get("access_token"):
                 account = self.credentials.get("email") or self.credentials["subject"]
-                notice = f"{PROVIDER_LABELS['chatgpt']}: {account}"
-            else:
-                notice = "Signed out. Use /login to sign in"
+                lines.append(f"{PROVIDER_LABELS['chatgpt']}: {account}")
+            if self.openrouter is not None:
+                lines.append(f"OpenRouter: {self.openrouter['label'] or 'API key'}")
+            notice = "\n".join(lines) if lines else "Signed out. Use /login to sign in"
             return Text(notice)
 
     async def discover_chatgpt_models(self) -> list[ModelMetadata]:
@@ -1056,9 +1135,14 @@ class VinApp:
             )
             preference = {"provider": "chatgpt", "model": selected_model}
             save_model_preference(preference["provider"], preference["model"])
-        self.models = models
+        self.set_models("chatgpt", models)
         self.selected_provider = preference["provider"]
         self.selected_model = preference["model"]
+
+    def set_models(self, provider: Provider, models: list[ModelMetadata]) -> None:
+        self.models = [
+            model for model in self.models if model["provider"] != provider
+        ] + models
 
     async def initialize_session(self, *, sign_in: bool = False) -> None:
         if not sign_in:
@@ -1068,21 +1152,45 @@ class VinApp:
                 self.transcript.append(
                     {"role": "notice", "content": Text(str(error), style="red")}
                 )
+            try:
+                self.openrouter = load_openrouter_account()
+            except RuntimeError as error:
+                self.transcript.append(
+                    {"role": "notice", "content": Text(str(error), style="red")}
+                )
         if self.credentials is None and not sign_in:
             self.credentials = await asyncio.to_thread(load_active_session)
 
         if not sign_in and self.credentials and self.credentials.get("access_token"):
             preference = load_model_preference()
-            if preference is not None:
-                self.models = load_cached_chatgpt_models(self.credentials)
+            if preference is not None and preference["provider"] == "chatgpt":
+                self.set_models("chatgpt", load_cached_chatgpt_models(self.credentials))
                 self.selected_provider = preference["provider"]
                 self.selected_model = preference["model"]
                 return
 
-        if sign_in or not self.credentials or not self.credentials.get("access_token"):
-            await self.choose_inline(
-                "Sign in to Vin", [("chatgpt", "Sign in with ChatGPT")]
+        if not sign_in and self.openrouter is not None:
+            preference = load_model_preference()
+            self.selected_provider = "openrouter"
+            self.selected_model = (
+                preference["model"]
+                if preference is not None and preference["provider"] == "openrouter"
+                else None
             )
+            return
+
+        if sign_in or not self.credentials or not self.credentials.get("access_token"):
+            method = await self.choose_inline(
+                "Sign in to Vin",
+                [
+                    ("chatgpt", "Sign in with ChatGPT"),
+                    ("openrouter", "Use an OpenRouter API key"),
+                ],
+            )
+            if method == "openrouter":
+                await self.sign_in_openrouter()
+                return
+
             if sign_in:
                 await self.sign_out(announce=False)
 
@@ -1124,6 +1232,8 @@ class VinApp:
                 f" {PROVIDER_LABELS[self.selected_provider]} · "
                 + model_display_name(self.models, self.selected_model)
             )
+        if self.selected_provider == "openrouter":
+            return " OpenRouter · No model selected"
         return (
             " No model selected · /login"
             if self.credentials and self.credentials.get("access_token")

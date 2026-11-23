@@ -443,7 +443,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         for window in (None, 500000):
             with self.subTest(window=window):
                 self.prepare_conversation()
-                model: ModelMetadata = {"slug": "chosen", "display_name": "Chosen"}
+                model: ModelMetadata = {"slug": "chosen", "display_name": "Chosen", "provider": "chatgpt"}
                 if window is not None:
                     model["context_window"] = window
                 self.owner.models = [model]
@@ -548,11 +548,11 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_threshold_uses_only_selected_models_known_context_window(self) -> None:
         cases: list[tuple[list[ModelMetadata], int | None]] = [
             ([
-                {"slug": "other", "display_name": "Other", "context_window": 1000000},
-                {"slug": "chosen", "display_name": "Chosen", "context_window": 500000},
+                {"slug": "other", "display_name": "Other", "provider": "chatgpt", "context_window": 1000000},
+                {"slug": "chosen", "display_name": "Chosen", "provider": "chatgpt", "context_window": 500000},
             ], 400000),
-            ([{"slug": "chosen", "display_name": "Chosen"}], None),
-            ([{"slug": "other", "display_name": "Other", "context_window": 500000}], None),
+            ([{"slug": "chosen", "display_name": "Chosen", "provider": "chatgpt"}], None),
+            ([{"slug": "other", "display_name": "Other", "provider": "chatgpt", "context_window": 500000}], None),
             ([], None),
         ]
         for models, expected in cases:
@@ -568,7 +568,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         for window in (None, 500000):
             with self.subTest(window=window):
                 self.prepare_conversation()
-                model: ModelMetadata = {"slug": "chosen", "display_name": "Chosen"}
+                model: ModelMetadata = {"slug": "chosen", "display_name": "Chosen", "provider": "chatgpt"}
                 if window is not None:
                     model["context_window"] = window
                 self.owner.models = [model]

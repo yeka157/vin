@@ -37,10 +37,11 @@ def _model_metadata(models: object) -> list[ModelMetadata]:
         metadata: ModelMetadata = {
             "slug": cast(str, model["slug"]),
             "display_name": cast(str, model["display_name"]),
+            "provider": "chatgpt",
         }
-        window = model.get('context_window')
+        window = model.get("context_window")
         if type(window) is int and window > 0:
-            metadata['context_window'] = window
+            metadata["context_window"] = window
         result.append(metadata)
 
     return result

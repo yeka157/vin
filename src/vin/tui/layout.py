@@ -75,7 +75,7 @@ def build_workspace(app: "VinApp") -> None:
                     "/rename": "Rename the current conversation",
                     "/user": "Show current account",
                     "/compact": "Compact the conversation context",
-                    "/login": "Sign in with ChatGPT Subscriptions",
+                    "/login": "Sign in with ChatGPT or an OpenRouter API key",
                     "/logout": "Sign out",
                     "/exit": "Exit Vin",
                     "/settings": "Subagent settings",
@@ -85,6 +85,7 @@ def build_workspace(app: "VinApp") -> None:
             ),
         ),
         complete_while_typing=True,
+        is_password=Condition(lambda: app.secret_future is not None),
     )
     app.input_window = app.session.layout.current_window
     app.input_window.height = Dimension(min=1)

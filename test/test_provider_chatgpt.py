@@ -47,8 +47,8 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.credentials = fixture_credentials("fake-access-token")
 
     def test_visible_models_keep_server_order(self) -> None:
-        first = {"slug": "model-b", "display_name": "B", "visibility": "list", "context_window": 500000}
-        second = {"slug": "model-a", "display_name": "A", "visibility": "list"}
+        first = {"slug": "model-b", "display_name": "B", "provider": "chatgpt", "visibility": "list", "context_window": 500000}
+        second = {"slug": "model-a", "display_name": "A", "provider": "chatgpt", "visibility": "list"}
         response = io.BytesIO(
             json.dumps({"models": [first, {"visibility": "hidden"}, second]}).encode()
         )
@@ -68,7 +68,7 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertEqual(request.call_args.kwargs, {"timeout": 60})
 
     def test_unusable_context_window_does_not_block_model_discovery(self) -> None:
-        expected = {"slug": "model-a", "display_name": "A", "visibility": "list"}
+        expected = {"slug": "model-a", "display_name": "A", "provider": "chatgpt", "visibility": "list"}
         for value in (None, True, 0, -1, "500000"):
             with self.subTest(value=value):
                 response = io.BytesIO(json.dumps({"models": [{**expected, "context_window": value}]}).encode())
@@ -111,7 +111,7 @@ class ModelDiscoveryTests(unittest.TestCase):
                 self.assertTrue(response.closed)
 
     def test_invalid_catalog_is_rejected(self) -> None:
-        valid = {"slug": "test-model", "display_name": "Test", "visibility": "list"}
+        valid = {"slug": "test-model", "display_name": "Test", "provider": "chatgpt", "visibility": "list"}
         payloads: list[JSONValue] = [None, [], {}, {"models": None}, {"models": {}}, {"models": [None]}]
         for field in ("slug", "display_name"):
             for value in (None, "", " ", 123):

@@ -79,10 +79,10 @@ Vin shows its progress and tool activity as it works. Completed tool groups coll
 | Command | What it does |
 | --- | --- |
 | `/help` | Show available commands |
-| `/user` | Show your account status |
+| `/user` | Show every signed-in account |
 | `/model` | Choose a model and remember it for future launches |
-| `/login` | Sign in with ChatGPT |
-| `/logout` | Sign out and clear local tokens |
+| `/login` | Sign in with ChatGPT or an OpenRouter API key |
+| `/logout` | Sign out of the provider in use and clear its saved sign-in |
 | `/clear` | Start a fresh conversation without deleting saved conversations |
 | `/resume` | Choose a saved conversation for the current project folder |
 | `/resume <title-or-id>` | Resume a conversation by its exact title or full session ID |

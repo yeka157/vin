@@ -27,7 +27,7 @@ def load_model_preference() -> ModelPreference | None:
     model = preference.get("model")
 
     if (
-        preference.get("provider") != "chatgpt"
+        preference.get("provider") not in ("chatgpt", "openrouter")
         or not isinstance(model, str)
         or not model.strip()
     ):
@@ -37,7 +37,11 @@ def load_model_preference() -> ModelPreference | None:
 
 
 def save_model_preference(provider: str, model: object) -> Path:
-    if provider != "chatgpt" or not isinstance(model, str) or not model.strip():
+    if (
+        provider not in ("chatgpt", "openrouter")
+        or not isinstance(model, str)
+        or not model.strip()
+    ):
         raise RuntimeError("Invalid model preference.")
 
     try:

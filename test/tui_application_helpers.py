@@ -20,6 +20,7 @@ from prompt_toolkit.output import ColorDepth
 from rich.console import Console
 from typing import TextIO
 
+from vin.provider.preferences import DEFAULT_SUBAGENT_SETTINGS
 from vin.tui import bindings, layout, transcript as transcript_ui
 from vin.tui.app import VinApp
 from vin.types import Credentials, TranscriptEntry
@@ -62,6 +63,9 @@ class ConsoleArguments(TypedDict, total=False):
 @contextmanager
 def patch_tui(module: ModuleType, *, create: bool = False, **replacements: object) -> Generator[None]:
     owners = {"PromptSession": layout, "Application": layout, "Console": transcript_ui}
+    # Startup reads files in ~/.config/vin; keep tests off the real ones unless a test replaces them.
+    replacements = {"load_openrouter_account": Mock(return_value=None),
+                    "load_subagent_settings": Mock(side_effect=lambda: DEFAULT_SUBAGENT_SETTINGS.copy())} | replacements
     with ExitStack() as stack:
         for name, value in replacements.items():
             stack.enter_context(patch.object(owners.get(name, module), name, value, create=create))

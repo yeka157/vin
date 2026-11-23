@@ -15,6 +15,7 @@ type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[
 # Provider history deliberately preserves opaque SDK output and future provider fields.
 type ProviderItem = dict[str, JSONValue]
 type History = list[ProviderItem]
+type Provider = Literal["chatgpt", "openrouter"]
 
 
 def is_record(value: object) -> TypeIs[dict[str, object]]:
@@ -94,11 +95,17 @@ class ModelMetadata(TypedDict):
     slug: str
     display_name: str
     context_window: NotRequired[int]
+    provider: Provider
 
 
 class ModelPreference(TypedDict):
-    provider: Literal["chatgpt"]
+    provider: Provider
     model: str
+
+
+class OpenRouterAccount(TypedDict):
+    key: str
+    label: str
 
 
 class EntryFlags(TypedDict):

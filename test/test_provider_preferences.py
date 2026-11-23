@@ -26,6 +26,14 @@ class ModelPreferenceTests(unittest.TestCase):
             {"provider": "chatgpt", "model": "test-model"},
         )
 
+    def test_openrouter_preference_can_be_saved_and_loaded(self) -> None:
+        preferences.save_model_preference("openrouter", "acme/coder")
+
+        self.assertEqual(
+            preferences.load_model_preference(),
+            {"provider": "openrouter", "model": "acme/coder"},
+        )
+
     def test_invalid_saved_data_is_rejected(self) -> None:
         bodies = [
             "not JSON",

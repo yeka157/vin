@@ -33,8 +33,8 @@ class ChatGPTModelCacheTests(unittest.TestCase):
             "id_token": "fake-id-token",
         }
         self.models: list[ModelMetadata] = [
-            {"slug": "old-model", "display_name": "Old Model"},
-            {"slug": "new-model", "display_name": "New Model"},
+            {"slug": "old-model", "display_name": "Old Model", "provider": "chatgpt"},
+            {"slug": "new-model", "display_name": "New Model", "provider": "chatgpt"},
         ]
 
     def cache_file(self) -> Path:
@@ -71,7 +71,7 @@ class ChatGPTModelCacheTests(unittest.TestCase):
                 self.assertEqual(
                     self.cache.load_cached_chatgpt_models(other_account), []
                 )
-                other_models = [{"slug": "other-model", "display_name": "Other Model"}]
+                other_models = [{"slug": "other-model", "display_name": "Other Model", "provider": "chatgpt"}]
                 self.cache.save_cached_chatgpt_models(other_account, other_models)
                 self.assertEqual(
                     self.cache.load_cached_chatgpt_models(other_account), other_models
@@ -82,11 +82,11 @@ class ChatGPTModelCacheTests(unittest.TestCase):
 
     def test_context_window_survives_cache_without_using_experimental_maximum(self) -> None:
         self.cache.save_cached_chatgpt_models(self.credentials, [{
-            "slug": "sized-model", "display_name": "Sized Model",
+            "slug": "sized-model", "display_name": "Sized Model", "provider": "chatgpt",
             "context_window": 500000, "max_context_window": 872000,
         }])
 
-        expected = [{"slug": "sized-model", "display_name": "Sized Model", "context_window": 500000}]
+        expected = [{"slug": "sized-model", "display_name": "Sized Model", "provider": "chatgpt", "context_window": 500000}]
         self.assertEqual(self.cache.load_cached_chatgpt_models(self.credentials), expected)
         self.assertEqual(json.loads(self.cache_file().read_text()), expected)
 
@@ -112,7 +112,7 @@ class ChatGPTModelCacheTests(unittest.TestCase):
 
     def test_cache_write_failure_preserves_the_previous_cache(self) -> None:
         self.cache.save_cached_chatgpt_models(self.credentials, self.models)
-        replacement = [{"slug": "replacement", "display_name": "Replacement"}]
+        replacement = [{"slug": "replacement", "display_name": "Replacement", "provider": "chatgpt"}]
         with patch.object(
             self.cache, "save_private_json", side_effect=RuntimeError("Disk unavailable")
         ):

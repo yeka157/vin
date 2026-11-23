@@ -71,6 +71,11 @@ def create_bindings(app: "VinApp") -> KeyBindings:
             return
         if app.viewed is not None:
             return
+        if app.secret_future is not None:
+            if not app.secret_future.done():
+                app.secret_future.set_result(event.current_buffer.text)
+            event.current_buffer.reset()
+            return
         text = event.current_buffer.text
         idle = (
             app.pending_reply is None
@@ -102,13 +107,16 @@ def create_bindings(app: "VinApp") -> KeyBindings:
 
     @bindings.add(
         "escape",
-        filter=Condition(lambda: app.choice_future is not None),
+        filter=Condition(lambda: app.choice_future is not None or app.secret_future is not None),
         eager=True,
     )
     @bindings.add("c-c")
-    @bindings.add("c-d", filter=Condition(lambda: app.choice_future is not None))
+    @bindings.add("c-d", filter=Condition(lambda: app.choice_future is not None or app.secret_future is not None))
     def cancel_or_exit(event: KeyPressEvent) -> None:
-        if app.choice_future is not None:
+        if app.secret_future is not None:
+            if not app.secret_future.done():
+                app.secret_future.cancel()
+        elif app.choice_future is not None:
             if not app.choice_future.done():
                 app.choice_future.cancel()
         elif app.pending_model_load is not None:

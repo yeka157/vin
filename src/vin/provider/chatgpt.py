@@ -171,6 +171,7 @@ def list_chatgpt_models(credentials: object) -> list[ModelMetadata]:
         if type(window) is not int or window <= 0:
             model.pop("context_window", None)
 
+        model["provider"] = "chatgpt"
         models.append(cast(ModelMetadata, model))
 
     return models
