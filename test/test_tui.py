@@ -1466,3 +1466,41 @@ class ModelCommandTests(unittest.TestCase):
         self.assertEqual(mock_prompt(self.session).await_count, 2)
         self.assert_error_notice("Could not save model preference", command="/model")
         self.assert_model_indicator(" ChatGPT · Old Model")
+
+
+class NoModelInputTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.vin_app = vin.VinApp()
+        self.vin_app.app = Mock()
+        self.buffer = Buffer(accept_handler=self.vin_app.accept_input)
+        self.notice: TranscriptEntry = {"role": "notice", "content": "No model selected. Use /model to choose one."}
+
+    def press_enter(self, text: str) -> None:
+        self.buffer.text = text
+        with set_app(Application(output=DummyOutput())):
+            self.buffer.validate_and_handle()
+
+    def test_a_prompt_without_a_model_is_kept_and_not_sent(self) -> None:
+        self.press_enter("explain this repo")
+        self.press_enter("explain this repo")
+        self.assertEqual(self.buffer.text, "explain this repo")
+        self.assertEqual(self.vin_app.transcript, [self.notice])
+        self.assertEqual(list(self.vin_app.queued_prompts), [])
+        self.assertTrue(self.vin_app.submitted.empty())
+
+    def test_commands_still_run_without_a_model(self) -> None:
+        self.press_enter("/model")
+        self.assertEqual(self.buffer.text, "")
+        self.assertEqual(self.vin_app.submitted.get_nowait(), "/model")
+        self.assertEqual(self.vin_app.transcript, [])
+
+    def test_blank_input_shows_no_notice(self) -> None:
+        self.press_enter("   ")
+        self.assertEqual(self.vin_app.transcript, [])
+
+    def test_a_prompt_with_a_model_is_queued(self) -> None:
+        self.vin_app.selected_provider, self.vin_app.selected_model = "openrouter", "acme/coder"
+        self.press_enter("explain this repo")
+        self.assertEqual(self.buffer.text, "")
+        self.assertEqual(list(self.vin_app.queued_prompts), ["explain this repo"])
+        self.assertEqual(self.vin_app.transcript, [])

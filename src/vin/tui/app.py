@@ -467,6 +467,15 @@ class VinApp:
         text = buffer.text
         if is_command(text):
             self.submitted.put_nowait(text)
+        elif self.selected_model is None and text.strip():
+            notice: TranscriptEntry = {
+                "role": "notice",
+                "content": "No model selected. Use /model to choose one.",
+            }
+            if self.transcript[-1:] != [notice]:
+                self.transcript.append(notice)
+            self.app.invalidate()
+            return True
         elif text.strip() or (self.queue_paused and self.queued_prompts):
             if text.strip():
                 self.queued_prompts.append(text)
