@@ -1,4 +1,4 @@
-# Vin
+# Vin — a terminal coding assistant that explores projects, edits files, and runs commands
 
 Vin is a terminal coding assistant that can explore a project, explain code, edit files, and run commands. Sign in with ChatGPT or an OpenRouter API key, choose a model, and describe what you want to do.
 
