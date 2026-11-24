@@ -8,7 +8,7 @@ from vin.agent import AgentError, run_reply
 from vin.auth.credentials import save_private_json
 from vin.provider.events import EventSender, ReplyEvent, make_senders
 from vin.provider.model_cache import parse_models
-from vin.types import History, ModelMetadata
+from vin.types import History, ModelMetadata, is_string_list
 from vin.provider.prompts import instructions
 from vin.types import is_list, is_record
 from typing import TYPE_CHECKING, Literal, cast
@@ -285,6 +285,19 @@ CATALOG_URL = "https://openrouter.ai/api/v1/models"
 WHITELIST_PATH = Path.home() / ".config" / "vin" / "openrouter_models.json"
 
 
+def _per_million(value: object) -> float | None:
+    if type(value) is str or type(value) is int or type(value) is float:
+        try:
+            price = float(value)
+            if price < 0:
+                return None
+            return round(price * 1_000_000, 4)
+        except ValueError:
+            return None
+
+    return None
+
+
 def list_openrouter_models() -> list[ModelMetadata]:
     try:
         with cast(HTTPResponse, urlopen(CATALOG_URL, timeout=15)) as response:
@@ -302,7 +315,7 @@ def list_openrouter_models() -> list[ModelMetadata]:
     if not is_list(data):
         raise RuntimeError("OpenRouter returned an invalid model list.")
 
-    models: list[ModelMetadata] = []
+    rows: list[tuple[int, ModelMetadata]] = []
     for entry in data:
         if (
             is_record(entry)
@@ -322,9 +335,32 @@ def list_openrouter_models() -> list[ModelMetadata]:
             window = entry.get("context_length")
             if type(window) is int and window > 0:
                 model["context_window"] = window
+            pricing = entry.get("pricing")
+            if is_record(pricing):
+                prompt = _per_million(pricing.get("prompt"))
+                completion = _per_million(pricing.get("completion"))
+                if prompt is not None and completion is not None:
+                    model["input_price"] = prompt
+                    model["output_price"] = completion
+            architecture = entry.get("architecture")
+            modalities = (
+                architecture.get("input_modalities")
+                if is_record(architecture)
+                else None
+            )
+            features = (
+                [m for m in modalities if m != "text"]
+                if is_string_list(modalities)
+                else []
+            )
+            if "reasoning" in parameters:
+                features.append("reasoning")
+            model["features"] = features
 
-            models.append(model)
-    return models
+            created = entry.get("created")
+
+            rows.append((created if type(created) is int else 0, model))
+    return [model for _, model in sorted(rows, key=lambda row: row[0], reverse=True)]
 
 
 def load_openrouter_whitelist() -> list[ModelMetadata]:

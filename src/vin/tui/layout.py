@@ -85,7 +85,6 @@ def build_workspace(app: "VinApp") -> None:
             ),
         ),
         complete_while_typing=True,
-        is_password=Condition(lambda: app.secret_future is not None),
     )
     app.input_window = app.session.layout.current_window
     app.input_window.height = Dimension(min=1)

@@ -12,11 +12,18 @@ from collections.abc import Coroutine, Sequence
 
 from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.formatted_text import fragment_list_to_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
-from prompt_toolkit.layout import Container, HSplit, Window
+from prompt_toolkit.layout import BufferControl, Container, HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.layout.processors import (
+    BeforeInput,
+    Processor,
+    Transformation,
+    TransformationInput,
+)
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import choice
 from prompt_toolkit.widgets import RadioList
@@ -37,6 +44,7 @@ from vin.auth.openrouter import (
     check_openrouter_key,
     delete_openrouter_account,
     load_openrouter_account,
+    mask_key,
     save_openrouter_account,
 )
 from vin.provider.chatgpt import list_chatgpt_models, stream_chatgpt_response
@@ -62,6 +70,7 @@ from vin.tools import LAUNCH_DIR
 from vin.tui import conversations
 from vin.tui.constants import PROVIDER_LABELS, is_command
 from vin.tui.layout import build_workspace
+from vin.tui.model_picker import ModelPicker
 from vin.tui.subagents import apply_subagent_event, finish_subagent
 from vin.tui.transcript import TranscriptControl, format_duration, render_transcript
 from vin.provider.events import ReplyEvents, TokenUsage
@@ -87,6 +96,14 @@ from vin.types import (
 def _task_is_cancelling() -> bool:
     task = asyncio.current_task()
     return task is not None and bool(task.cancelling())
+
+
+class MaskKey(Processor):
+    def apply_transformation(
+        self, transformation_input: TransformationInput
+    ) -> Transformation:
+        text = fragment_list_to_text(transformation_input.fragments)
+        return Transformation([("", mask_key(text, max(len(text) - 13, 0)))])
 
 
 def create_choice_menu(
@@ -255,45 +272,54 @@ class VinApp:
         self.subagent_settings: SubagentSettings = DEFAULT_SUBAGENT_SETTINGS.copy()
         self.openrouter: OpenRouterAccount | None = None
         self.secret_future: asyncio.Future[str] | None = None
+        self.picker: ModelPicker | None = None
 
     async def ask_secret(self, message: str) -> str:
         if self.choice_future is not None or self.secret_future is not None:
             raise RuntimeError("A choice is already open")
-        buffer = self.session.default_buffer
-        draft = buffer.document
-        buffer.reset()
-        self.auth_status = message
+        buffer = Buffer(multiline=False)
+        field = Window(
+            BufferControl(buffer, input_processors=[MaskKey(), BeforeInput(" › ")]),
+            height=1,
+        )
+        self.choice_menu = HSplit(
+            [
+                Window(FormattedTextControl(f" {message}"), height=1, style="bold"),
+                field,
+                Window(
+                    FormattedTextControl(" Enter to confirm"),
+                    height=1,
+                    style="class:placeholder",
+                ),
+            ]
+        )
         self.secret_future = asyncio.get_running_loop().create_future()
-        self.app.invalidate()
         try:
+            self.session.layout.focus(field)
+            self.app.invalidate()
             return await self.secret_future
         finally:
             self.secret_future = None
-            buffer.document = draft
-            self.auth_status = None
+            self.choice_menu = None
+            self.session.layout.focus(self.input_window)
             self.app.invalidate()
 
     async def sign_in_openrouter(self) -> None:
         try:
-            key = await self.ask_secret(
-                "Paste your OpenRouter API key · Enter to confirm · Esc to cancel"
-            )
+            key = await self.ask_secret("Paste your OpenRouter API key")
         except asyncio.CancelledError:
             if _task_is_cancelling():
                 raise
             return
-        self.auth_status = "Checking key…"
-        self.app.invalidate()
         account = await asyncio.to_thread(check_openrouter_key, key)
         save_openrouter_account(account)
         self.openrouter = account
-        self.selected_provider = "openrouter"
-        self.selected_model = None
-        self.last_usage = None
+        if self.selected_provider is None:
+            self.selected_provider = "openrouter"
         self.transcript.append(
             {
                 "role": "notice",
-                "content": f"Signed in to OpenRouter{' · ' + account['label'] if account['label'] else ''}.",
+                "content": f"Signed in to OpenRouter · {mask_key(account['key'])}.",
             }
         )
         self.set_models("openrouter", load_openrouter_whitelist())
@@ -301,10 +327,9 @@ class VinApp:
             added = await self.add_openrouter_model("")
             if added:
                 self.transcript.append({"role": "notice", "content": added})
-        if self.models:
-            chosen = await self.change_model()
-            if chosen:
-                self.transcript.append({"role": "notice", "content": chosen})
+        chosen = self.auto_select_model()
+        if chosen:
+            self.transcript.append({"role": "notice", "content": chosen})
 
     def panel_agents(self) -> list[Subagent]:
         return self.subagents[self.panel_start :]
@@ -789,6 +814,45 @@ class VinApp:
         save_openrouter_whitelist(models)
         self.set_models("openrouter", models)
 
+    def auto_select_model(self) -> str | None:
+        if self.selected_model is None and len(self.models) == 1:
+            return self.select_model(self.models[0])
+        return None
+
+    async def pick_models(
+        self,
+        title: str,
+        models: list[ModelMetadata],
+        *,
+        multi: bool,
+        action: str,
+        current: tuple[str, str] | None = None,
+        search: str = "",
+    ) -> list[ModelMetadata] | None:
+        if self.choice_future is not None:
+            raise RuntimeError("A choice is already open")
+        picker = ModelPicker(
+            title, models, multi=multi, action=action, current=current, search=search
+        )
+        self.picker = picker
+        self.choice_menu = picker.container
+        self.choice_future = asyncio.get_running_loop().create_future()
+        try:
+            self.session.layout.focus(picker.search_window)
+            self.app.invalidate()
+            await self.choice_future
+            return picker.chosen()
+        except asyncio.CancelledError:
+            if _task_is_cancelling():
+                raise
+            return None
+        finally:
+            self.picker = None
+            self.choice_menu = None
+            self.choice_future = None
+            self.session.layout.focus(self.input_window)
+            self.app.invalidate()
+
     async def change_model(self) -> str | None:
         chatgpt = bool(self.credentials and self.credentials.get("access_token"))
         if not chatgpt and self.openrouter is None:
@@ -800,26 +864,16 @@ class VinApp:
             self.set_models("chatgpt", models)
         if not self.models:
             return "No models yet. Use /model add to add an OpenRouter model."
-        options = {
-            f"{model['provider']}:{model['slug']}": model for model in self.models
-        }
-        try:
-            key = await self.choose_inline(
-                "Choose a model",
-                [
-                    (
-                        key,
-                        f"{model['display_name']} · {PROVIDER_LABELS[model['provider']]}",
-                    )
-                    for key, model in options.items()
-                ],
-                default=f"{self.selected_provider}:{self.selected_model}",
-            )
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
+        picked = await self.pick_models(
+            "Choose a model",
+            self.models,
+            multi=False,
+            action="choose",
+            current=(self.selected_provider or "", self.selected_model or ""),
+        )
+        if not picked:
             return None
-        chosen = options[key]
+        chosen = picked[0]
         if (
             chosen["provider"] == self.selected_provider
             and chosen["slug"] == self.selected_model
@@ -837,36 +891,19 @@ class VinApp:
             model for model in self.models if model["provider"] == "openrouter"
         ]
         added = {model["slug"] for model in whitelist}
-        search = query.casefold()
-        matches = [
-            model
-            for model in catalog
-            if model["slug"] not in added
-            and (
-                search in model["slug"].casefold()
-                or search in model["display_name"].casefold()
-            )
-        ]
+        matches = [model for model in catalog if model["slug"] not in added]
         if not matches:
-            return (
-                f'No OpenRouter models match "{query}".'
-                if query
-                else "Every OpenRouter model with tool support is already added."
-            )
-        try:
-            slug = await self.choose_inline(
-                "Add an OpenRouter model",
-                [(model["slug"], model["display_name"]) for model in matches],
-            )
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
+            return "Every OpenRouter model with tool support is already added."
+        picked = await self.pick_models(
+            "Add OpenRouter models", matches, multi=True, action="add", search=query
+        )
+        if not picked:
             return None
-        model = next(model for model in matches if model["slug"] == slug)
-        whitelist.append(model)
-        self.save_whitelist(whitelist)
+        self.save_whitelist(whitelist + picked)
+        message = f"Added OpenRouter · {', '.join(m['display_name'] for m in picked)}."
+        selected = self.auto_select_model()
         return (
-            f"Added OpenRouter · {model['display_name']}. Use /model to switch to it."
+            f"{message} {selected}" if selected else f"{message} Use /model to switch."
         )
 
     async def remove_openrouter_model(self) -> str | None:
@@ -875,26 +912,24 @@ class VinApp:
         ]
         if not whitelist:
             return "No OpenRouter models to remove."
-        try:
-            slug = await self.choose_inline(
-                "Remove an OpenRouter model",
-                [(model["slug"], model["display_name"]) for model in whitelist],
-            )
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
+        picked = await self.pick_models(
+            "Remove OpenRouter models", whitelist, multi=True, action="remove"
+        )
+        if not picked:
             return None
-        removed = next(model for model in whitelist if model["slug"] == slug)
-        remaining = [model for model in whitelist if model["slug"] != slug]
-        self.save_whitelist(remaining)
-        message = f"Removed OpenRouter · {removed['display_name']}."
-        if self.selected_provider == "openrouter" and self.selected_model == slug:
+        removed = {m["slug"] for m in picked}
+        self.save_whitelist([m for m in whitelist if m["slug"] not in removed])
+        message = (
+            f"Removed OpenRouter · {', '.join(m['display_name'] for m in picked)}."
+        )
+        if self.selected_provider == "openrouter" and self.selected_model in removed:
             self.selected_model = None
             self.last_usage = None
-            if self.models:
+            outcome = self.auto_select_model()
+            if not outcome and self.models:
                 outcome = await self.change_model()
-                if outcome:
-                    return f"{message} {outcome}"
+            if outcome:
+                return f"{message} {outcome}"
         return message
 
     async def run_auth_command(self, text: str) -> None:
@@ -1234,7 +1269,7 @@ class VinApp:
                 account = self.credentials.get("email") or self.credentials["subject"]
                 lines.append(f"{PROVIDER_LABELS['chatgpt']}: {account}")
             if self.openrouter is not None:
-                lines.append(f"OpenRouter: {self.openrouter['label'] or 'API key'}")
+                lines.append(f"OpenRouter: {mask_key(self.openrouter['key'])}")
             notice = "\n".join(lines) if lines else "Signed out. Use /login to sign in"
             return Text(notice)
 

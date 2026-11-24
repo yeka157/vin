@@ -544,19 +544,19 @@ class InitialModelTests(unittest.TestCase):
         self.app.last_usage = usage.copy()
         self.app.models = self.models
 
-        self.inline.side_effect = asyncio.CancelledError
+        pick = AsyncMock(return_value=None)
+        self.enterContext(patch.object(self.app, "pick_models", pick))
         self.assertIsNone(asyncio.run(self.app.change_model()))
         self.assertEqual(self.app.last_usage, usage)
         self.assertEqual(self.app.selected_model, "old-model")
         self.save.assert_not_called()
 
-        self.inline.side_effect = None
-        self.inline.return_value = "chatgpt:old-model"
+        pick.return_value = [self.models[0]]
         self.assertIsNone(asyncio.run(self.app.change_model()))
         self.assertEqual(self.app.last_usage, usage)
         self.save.assert_not_called()
 
-        self.inline.return_value = "chatgpt:new-model"
+        pick.return_value = [self.models[1]]
         self.save.side_effect = OSError("Could not save preference")
         with self.assertRaisesRegex(OSError, "Could not save preference"):
             asyncio.run(self.app.change_model())
@@ -595,7 +595,8 @@ class ModelCommandTests(unittest.TestCase):
         self.catalog = Mock(return_value=self.models)
         self.load = Mock(return_value={"provider": "chatgpt", "model": "old-model"})
         self.choose = Mock(return_value="new-model")
-        self.inline = AsyncMock(return_value="chatgpt:new-model")
+        self.inline = AsyncMock(return_value="new-model")
+        self.pick = AsyncMock(return_value=[self.models[1]])
         self.save = Mock()
         self.cached = Mock(return_value=self.models)
         self.cache_save = Mock()
@@ -604,7 +605,8 @@ class ModelCommandTests(unittest.TestCase):
         self.vin_app = vin.VinApp()
         self.session.prompt_async = AsyncMock(side_effect=commands)
 
-        with patch.object(self.vin_app, "choose_inline", self.inline), patch_tui(
+        with patch.object(self.vin_app, "choose_inline", self.inline), \
+                patch.object(self.vin_app, "pick_models", self.pick), patch_tui(
             vin,
             create=True,
             PromptSession=self.factory,
@@ -830,10 +832,8 @@ class ModelCommandTests(unittest.TestCase):
         self.refresh.assert_called_once_with(self.credentials)
         self.catalog.assert_called_once_with(self.credentials)
         self.cache_save.assert_called_once_with(self.credentials, self.models)
-        self.inline.assert_awaited_once_with(
-            "Choose a model",
-            [("chatgpt:old-model", "Old Model · ChatGPT"), ("chatgpt:new-model", "New Model · ChatGPT")],
-            default="chatgpt:old-model",
+        self.pick.assert_awaited_once_with(
+            "Choose a model", self.models, multi=False, action="choose", current=("chatgpt", "old-model"),
         )
         self.save.assert_called_once_with("chatgpt", "new-model")
         self.assert_model_indicator(" ChatGPT · New Model")
@@ -1178,22 +1178,20 @@ class ModelCommandTests(unittest.TestCase):
 
 
     def test_model_command_opens_picker_and_saves_selection(self) -> None:
-        async def pick(message: str, options: Sequence[tuple[str, str]], default: str | None = None) -> str:
+        async def pick(*_args: object, **_kwargs: object) -> list[ModelMetadata]:
             self.assertEqual(len(self.vin_app.transcript), 1)
-            return "chatgpt:new-model"
+            return [self.models[1]]
 
         def save(provider: str, model: str) -> None:
             self.assertEqual(len(self.vin_app.transcript), 1)
 
-        self.inline.side_effect = pick
+        self.pick.side_effect = pick
         self.save.side_effect = save
         self.run_chat(["/model", "/quit"])
 
         self.choose.assert_not_called()
-        self.inline.assert_awaited_once_with(
-            "Choose a model",
-            [("chatgpt:old-model", "Old Model · ChatGPT"), ("chatgpt:new-model", "New Model · ChatGPT")],
-            default="chatgpt:old-model",
+        self.pick.assert_awaited_once_with(
+            "Choose a model", self.models, multi=False, action="choose", current=("chatgpt", "old-model"),
         )
         self.save.assert_called_once_with("chatgpt", "new-model")
         self.catalog.assert_not_called()

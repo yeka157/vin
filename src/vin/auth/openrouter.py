@@ -68,3 +68,9 @@ def delete_openrouter_account() -> None:
         ACCOUNT_PATH.unlink(missing_ok=True)
     except OSError:
         raise RuntimeError("Could not remove the saved OpenRouter key.") from None
+
+
+def mask_key(key: str, hidden: int = 3) -> str:
+    if len(key) > 13:
+        return key[:9] + "•" * hidden + key[-4:]
+    return "•" * len(key)

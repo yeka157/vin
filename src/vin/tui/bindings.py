@@ -84,6 +84,8 @@ def create_bindings(app: "VinApp") -> KeyBindings:
         )
         if app.choice_future is not None:
             if not app.choice_future.done():
+                if app.picker is not None and not app.picker.chosen():
+                    return
                 if app.choices is not None:
                     picker_bindings = app.choices.control.get_key_bindings()
                     assert picker_bindings is not None
@@ -107,11 +109,18 @@ def create_bindings(app: "VinApp") -> KeyBindings:
 
     @bindings.add(
         "escape",
-        filter=Condition(lambda: app.choice_future is not None or app.secret_future is not None),
+        filter=Condition(
+            lambda: app.choice_future is not None or app.secret_future is not None
+        ),
         eager=True,
     )
     @bindings.add("c-c")
-    @bindings.add("c-d", filter=Condition(lambda: app.choice_future is not None or app.secret_future is not None))
+    @bindings.add(
+        "c-d",
+        filter=Condition(
+            lambda: app.choice_future is not None or app.secret_future is not None
+        ),
+    )
     def cancel_or_exit(event: KeyPressEvent) -> None:
         if app.secret_future is not None:
             if not app.secret_future.done():

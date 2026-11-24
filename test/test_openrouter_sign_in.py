@@ -19,7 +19,10 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import to_filter
 from prompt_toolkit.input import DummyInput
+from prompt_toolkit.formatted_text.utils import fragment_list_to_text
 from prompt_toolkit.key_binding import KeyPressEvent
+from prompt_toolkit.layout import BufferControl, HSplit, Window
+from prompt_toolkit.layout.processors import TransformationInput
 from prompt_toolkit.output import DummyOutput
 from rich.text import Text
 
@@ -145,62 +148,93 @@ class SecretInputTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.vin = VinApp()
         self.vin.app = Mock()
-        self.buffer = Buffer(document=Document("half-typed draft", cursor_position=4))
-        self.vin.session = cast(PromptSession[str], Mock(spec=PromptSession, default_buffer=self.buffer))
+        self.draft = Buffer(document=Document("half-typed draft", cursor_position=4))
+        self.focus = Mock()
+        self.vin.session = cast(PromptSession[str], Mock(default_buffer=self.draft, layout=Mock(focus=self.focus)))
+        self.vin.input_window = Mock()
         bindings = create_bindings(self.vin)
         self.handlers = {binding.handler.__name__: binding.handler for binding in bindings.bindings}
 
-    def press(self, name: str) -> None:
-        event = cast(KeyPressEvent, Mock(current_buffer=self.buffer, app=Mock()))
+    def press(self, name: str, buffer: Buffer) -> None:
+        event = cast(KeyPressEvent, Mock(current_buffer=buffer, app=Mock()))
         _ = self.handlers[name](event)
 
-    async def wait_for_prompt(self) -> None:
+    async def open_field(self, message: str = "Paste key") -> tuple["asyncio.Task[str]", Window]:
+        task = asyncio.create_task(self.vin.ask_secret(message))
         async with asyncio.timeout(1):
             while self.vin.secret_future is None:
                 await asyncio.sleep(0)
+        assert isinstance(self.vin.choice_menu, HSplit)
+        field = self.vin.choice_menu.children[1]
+        assert isinstance(field, Window)
+        return task, field
 
-    async def test_enter_returns_the_typed_key_and_restores_the_draft(self) -> None:
-        task = asyncio.create_task(self.vin.ask_secret("Paste key"))
-        await self.wait_for_prompt()
-        self.assertEqual((self.buffer.text, self.vin.auth_status), ("", "Paste key"))
-
-        self.buffer.text = KEY
-        self.press("submit")
+    async def test_the_key_is_typed_in_the_popup_and_the_draft_is_untouched(self) -> None:
+        task, field = await self.open_field()
+        assert isinstance(field.content, BufferControl)
+        self.focus.assert_called_with(field)
+        field.content.buffer.text = KEY
+        self.press("submit", field.content.buffer)
 
         self.assertEqual(await task, KEY)
-        self.assertEqual((self.buffer.text, self.buffer.cursor_position), ("half-typed draft", 4))
+        self.assertEqual((self.draft.text, self.draft.cursor_position), ("half-typed draft", 4))
         self.assertIsNone(self.vin.secret_future)
-        self.assertIsNone(self.vin.auth_status)
+        self.assertIsNone(self.vin.choice_menu)
+        self.focus.assert_called_with(self.vin.input_window)
 
-    async def test_escape_cancels_and_restores_the_draft(self) -> None:
-        task = asyncio.create_task(self.vin.ask_secret("Paste key"))
-        await self.wait_for_prompt()
-        self.buffer.text = "sk-partial"
-        self.press("cancel_or_exit")
+    async def test_escape_cancels_and_closes_the_popup(self) -> None:
+        task, field = await self.open_field()
+        assert isinstance(field.content, BufferControl)
+        field.content.buffer.text = "sk-partial"
+        self.press("cancel_or_exit", field.content.buffer)
 
         with self.assertRaises(asyncio.CancelledError):
             await task
-        self.assertEqual(self.buffer.text, "half-typed draft")
+        self.assertEqual(self.draft.text, "half-typed draft")
         self.assertIsNone(self.vin.secret_future)
+        self.assertIsNone(self.vin.choice_menu)
 
     async def test_a_second_prompt_is_refused_while_one_is_open(self) -> None:
-        task = asyncio.create_task(self.vin.ask_secret("Paste key"))
-        await self.wait_for_prompt()
+        task, _field = await self.open_field()
         with self.assertRaisesRegex(RuntimeError, "A choice is already open"):
             await self.vin.ask_secret("Again")
         task.cancel()
         _ = await asyncio.gather(task, return_exceptions=True)
 
-    def test_input_is_masked_only_while_a_key_is_asked(self) -> None:
+    async def test_the_field_shows_only_the_start_and_end_of_the_key(self) -> None:
+        task, field = await self.open_field()
+        assert isinstance(field.content, BufferControl)
+        mask = next(p for p in field.content.input_processors or [] if isinstance(p, app_module.MaskKey))
+        key = "sk-or-v1-0123456789abcdef1c96"
+        for typed, shown in ((key, "sk-or-v1-" + "•" * (len(key) - 13) + "1c96"),
+                             ("sk-or-v1-abc", "•" * 12), ("", "")):
+            with self.subTest(typed=typed):
+                document = Document(typed)
+                result = mask.apply_transformation(TransformationInput(
+                    field.content, document, 0, lambda i: i, [("", typed)], 80, 1))
+                self.assertEqual(fragment_list_to_text(result.fragments), shown)
+                self.assertEqual(len(shown), len(typed))
+        task.cancel()
+        _ = await asyncio.gather(task, return_exceptions=True)
+
+    def test_the_composer_is_never_a_password_field(self) -> None:
         vin = VinApp()
         with create_app_session(input=DummyInput(), output=DummyOutput()):
             build_workspace(vin)
-        masked = to_filter(vin.session.is_password)
-        self.assertFalse(masked())
         loop = asyncio.new_event_loop()
         self.addCleanup(loop.close)
         vin.secret_future = loop.create_future()
-        self.assertTrue(masked())
+        self.assertFalse(to_filter(vin.session.is_password)())
+
+
+class MaskKeyTests(unittest.TestCase):
+    def test_short_form_keeps_the_prefix_and_last_four(self) -> None:
+        self.assertEqual(openrouter.mask_key("sk-or-v1-0123456789abcdef1c96"), "sk-or-v1-•••1c96")
+
+    def test_short_keys_are_fully_hidden(self) -> None:
+        for key in ("", "sk-or-v1-abc", "sk-or-v1-abcd"):
+            with self.subTest(key=key):
+                self.assertEqual(openrouter.mask_key(key), "•" * len(key))
 
 
 class SignInTests(unittest.IsolatedAsyncioTestCase):
@@ -214,57 +248,83 @@ class SignInTests(unittest.IsolatedAsyncioTestCase):
         self.whitelist = self.enterContext(patch.object(app_module, "load_openrouter_whitelist", return_value=[]))
         self.add = self.enterContext(patch.object(self.vin, "add_openrouter_model", AsyncMock(return_value=None)))
         self.change = self.enterContext(patch.object(self.vin, "change_model", AsyncMock(return_value=None)))
+        self.save_choice = self.enterContext(patch.object(app_module, "save_model_preference"))
 
-    async def test_valid_key_is_saved_and_openrouter_becomes_the_provider(self) -> None:
+    async def test_valid_key_is_saved_and_the_current_model_is_kept(self) -> None:
         self.vin.credentials = fixture_credentials()
         self.vin.selected_provider, self.vin.selected_model = "chatgpt", "gpt"
 
         await self.vin.sign_in_openrouter()
 
+        self.ask.assert_awaited_once_with("Paste your OpenRouter API key")
         self.check.assert_called_once_with(KEY)
         self.save.assert_called_once_with(ACCOUNT)
         self.assertEqual(self.vin.openrouter, ACCOUNT)
-        self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("openrouter", None))
+        self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("chatgpt", "gpt"))
         self.assertEqual(self.vin.models, [CHATGPT_MODEL])
         self.assertEqual(self.vin.credentials, fixture_credentials())
-        self.assertEqual(notices(self.vin.transcript), ["Signed in to OpenRouter · laptop."])
+        self.assertEqual(notices(self.vin.transcript), ["Signed in to OpenRouter · sk-or-v1-•••cret."])
+        self.save_choice.assert_not_called()
+        self.change.assert_not_awaited()
 
-    async def test_first_sign_in_opens_add_then_the_model_picker(self) -> None:
-        self.add.return_value = "Added OpenRouter · Coder. Use /model to switch to it."
-        self.change.return_value = "Model: OpenRouter · Coder"
+    async def test_first_sign_in_adds_and_selects_the_only_model(self) -> None:
         self.vin.models = []
 
         async def add(query: str) -> str:
             self.vin.models = [OPENROUTER_MODEL]
-            return "Added OpenRouter · Coder. Use /model to switch to it."
+            return "Added OpenRouter · Coder. Use /model to switch."
         self.add.side_effect = add
 
         await self.vin.sign_in_openrouter()
 
         self.add.assert_awaited_once_with("")
-        self.change.assert_awaited_once_with()
+        self.change.assert_not_awaited()
+        self.save_choice.assert_called_once_with("openrouter", "acme/coder")
+        self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("openrouter", "acme/coder"))
         self.assertEqual(notices(self.vin.transcript), [
-            "Signed in to OpenRouter · laptop.",
-            "Added OpenRouter · Coder. Use /model to switch to it.",
+            "Signed in to OpenRouter · sk-or-v1-•••cret.",
+            "Added OpenRouter · Coder. Use /model to switch.",
             "Model: OpenRouter · Coder"])
 
-    async def test_saved_list_skips_add_and_opens_the_model_picker(self) -> None:
+    async def test_first_sign_in_with_several_models_leaves_the_choice_for_later(self) -> None:
+        self.vin.models = []
+        other: ModelMetadata = {"slug": "acme/other", "display_name": "Other", "provider": "openrouter"}
+
+        async def add(query: str) -> str:
+            self.vin.models = [OPENROUTER_MODEL, other]
+            return "Added OpenRouter · Coder, Other. Use /model to switch."
+        self.add.side_effect = add
+
+        await self.vin.sign_in_openrouter()
+
+        self.change.assert_not_awaited()
+        self.save_choice.assert_not_called()
+        self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("openrouter", None))
+        self.assertEqual(self.vin.model_indicator_text(), " OpenRouter · No model selected")
+
+    async def test_saved_list_skips_add_and_keeps_the_selection(self) -> None:
+        self.whitelist.return_value = [OPENROUTER_MODEL]
+        self.vin.selected_provider, self.vin.selected_model = "chatgpt", "gpt"
+        await self.vin.sign_in_openrouter()
+        self.add.assert_not_awaited()
+        self.change.assert_not_awaited()
+        self.assertEqual(self.vin.models, [CHATGPT_MODEL, OPENROUTER_MODEL])
+        self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("chatgpt", "gpt"))
+
+    async def test_saved_list_with_one_model_and_no_selection_selects_it(self) -> None:
+        self.vin.models = []
         self.whitelist.return_value = [OPENROUTER_MODEL]
         await self.vin.sign_in_openrouter()
         self.add.assert_not_awaited()
-        self.change.assert_awaited_once_with()
-        self.assertEqual(self.vin.models, [CHATGPT_MODEL, OPENROUTER_MODEL])
+        self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("openrouter", "acme/coder"))
 
-    async def test_cancelled_add_with_no_models_opens_no_picker(self) -> None:
+    async def test_cancelled_add_with_no_models_selects_nothing(self) -> None:
         self.vin.models = []
         await self.vin.sign_in_openrouter()
         self.add.assert_awaited_once_with("")
         self.change.assert_not_awaited()
-
-    async def test_key_without_label_signs_in_without_one(self) -> None:
-        self.check.return_value = {"key": KEY, "label": ""}
-        await self.vin.sign_in_openrouter()
-        self.assertEqual(notices(self.vin.transcript), ["Signed in to OpenRouter."])
+        self.save_choice.assert_not_called()
+        self.assertEqual(notices(self.vin.transcript), ["Signed in to OpenRouter · sk-or-v1-•••cret."])
 
     async def test_rejected_key_saves_nothing_and_changes_nothing(self) -> None:
         self.check.side_effect = RuntimeError("OpenRouter key was rejected.")
@@ -286,6 +346,7 @@ class SignInTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_login_picker_offers_openrouter_and_keeps_chatgpt_signed_in(self) -> None:
         self.vin.credentials = fixture_credentials()
+        self.vin.selected_provider, self.vin.selected_model = "chatgpt", "gpt"
         inline = self.enterContext(patch.object(self.vin, "choose_inline", AsyncMock(return_value="openrouter")))
         sign_out = self.enterContext(patch.object(self.vin, "sign_out", AsyncMock()))
         login = self.enterContext(patch.object(app_module, "login_with_chatgpt"))
@@ -297,7 +358,8 @@ class SignInTests(unittest.IsolatedAsyncioTestCase):
             [("chatgpt", "Sign in with ChatGPT"), ("openrouter", "Use an OpenRouter API key")])
         sign_out.assert_not_awaited()
         login.assert_not_called()
-        self.assertEqual(self.vin.selected_provider, "openrouter")
+        self.assertEqual(self.vin.openrouter, ACCOUNT)
+        self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("chatgpt", "gpt"))
         self.assertEqual(self.vin.credentials, fixture_credentials())
 
 
@@ -443,11 +505,12 @@ class AccountDisplayTests(unittest.TestCase):
     def test_user_lists_every_signed_in_account(self) -> None:
         self.vin.credentials = {**fixture_credentials(), "email": "me@example.test"}
         self.vin.openrouter = ACCOUNT
-        self.assertEqual(self.user(), "ChatGPT: me@example.test\nOpenRouter: laptop")
+        self.assertEqual(self.user(), "ChatGPT: me@example.test\nOpenRouter: sk-or-v1-•••cret")
 
-    def test_user_shows_openrouter_alone_and_never_the_key(self) -> None:
-        self.vin.openrouter = {"key": KEY, "label": ""}
-        self.assertEqual(self.user(), "OpenRouter: API key")
+    def test_user_shows_openrouter_alone_and_never_the_whole_key(self) -> None:
+        self.vin.openrouter = {"key": "sk-or-v1-0123456789abcdef1c96", "label": ""}
+        self.assertEqual(self.user(), "OpenRouter: sk-or-v1-•••1c96")
+        self.assertNotIn("0123456789abcdef", self.user())
 
     def test_user_when_signed_out_of_both(self) -> None:
         self.assertEqual(self.user(), "Signed out. Use /login to sign in")

@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from typing import cast
-from vin.types import ModelMetadata, Provider, is_record, is_list
+from vin.types import ModelMetadata, Provider, is_record, is_list, is_string_list
 
 import json
 from hashlib import sha256
@@ -42,6 +42,20 @@ def parse_models(models: object, provider: Provider) -> list[ModelMetadata]:
         window = model.get("context_window")
         if type(window) is int and window > 0:
             metadata["context_window"] = window
+        input_price = model.get("input_price")
+        output_price = model.get("output_price")
+        if (
+            type(input_price) is int or type(input_price) is float
+        ) and input_price >= 0:
+            metadata["input_price"] = input_price
+        if (
+            type(output_price) is int or type(output_price) is float
+        ) and output_price >= 0:
+            metadata["output_price"] = output_price
+        features = model.get("features")
+        if is_string_list(features):
+            metadata["features"] = features
+
         result.append(metadata)
 
     return result
