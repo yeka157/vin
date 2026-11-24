@@ -8,7 +8,7 @@ from time import monotonic
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, TypedDict
-from collections.abc import Sequence
+from collections.abc import Coroutine, Sequence
 
 from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.buffer import Buffer
@@ -39,7 +39,12 @@ from vin.auth.openrouter import (
     save_openrouter_account,
 )
 from vin.provider.chatgpt import list_chatgpt_models, stream_chatgpt_response
-from vin.provider.openrouter import stream_openrouter_response
+from vin.provider.openrouter import (
+    list_openrouter_models,
+    load_openrouter_whitelist,
+    save_openrouter_whitelist,
+    stream_openrouter_response,
+)
 from vin.provider.model_cache import (
     load_cached_chatgpt_models,
     save_cached_chatgpt_models,
@@ -290,6 +295,15 @@ class VinApp:
                 "content": f"Signed in to OpenRouter{' · ' + account['label'] if account['label'] else ''}.",
             }
         )
+        self.set_models("openrouter", load_openrouter_whitelist())
+        if not any(model["provider"] == "openrouter" for model in self.models):
+            added = await self.add_openrouter_model("")
+            if added:
+                self.transcript.append({"role": "notice", "content": added})
+        if self.models:
+            chosen = await self.change_model()
+            if chosen:
+                self.transcript.append({"role": "notice", "content": chosen})
 
     def panel_agents(self) -> list[Subagent]:
         return self.subagents[self.panel_start :]
@@ -744,57 +758,142 @@ class VinApp:
     def rename_conversation(self, name: object) -> str | None:
         return conversations.rename_conversation(self, name)
 
-    async def change_model(self) -> str | None:
-        if not self.credentials or not self.credentials.get("access_token"):
-            return "Sign in with /login before choosing a model."
-
-        if self.selected_provider is None:
-            raise RuntimeError("Model setup is incomplete. Use /login to try again.")
-
-        models = self.models
-        provider_name = PROVIDER_LABELS[self.selected_provider]
-
-        if not models:
-            self.loading_model = True
-            task = asyncio.create_task(self.discover_chatgpt_models())
-            self.pending_model_load = task
-            self.app.invalidate()
-            try:
-                models = await task
-                self.set_models("chatgpt", models)
-            except asyncio.CancelledError:
-                if _task_is_cancelling():
-                    raise
-                return
-            finally:
-                self.pending_model_load = None
-                self.loading_model = False
-                self.app.invalidate()
-
-        if not models:
-            raise RuntimeError(
-                f"No {provider_name} models are available for this account."
-            )
-
+    async def wait_for_models(
+        self, load: Coroutine[object, object, list[ModelMetadata]]
+    ) -> list[ModelMetadata] | None:
+        self.loading_model = True
+        task = asyncio.create_task(load)
+        self.pending_model_load = task
+        self.app.invalidate()
         try:
-            new_model = await self.choose_inline(
-                f"Choose a {provider_name} model",
-                [(model["slug"], model["display_name"]) for model in models],
-                default=self.selected_model,
+            return await task
+        except asyncio.CancelledError:
+            if _task_is_cancelling():
+                raise
+            return None
+        finally:
+            self.pending_model_load = None
+            self.loading_model = False
+            self.app.invalidate()
+
+    def select_model(self, model: ModelMetadata) -> str:
+        save_model_preference(model["provider"], model["slug"])
+        self.selected_provider = model["provider"]
+        self.selected_model = model["slug"]
+        self.last_usage = None
+        return f"Model: {PROVIDER_LABELS[model['provider']]} · {model['display_name']}"
+
+    def save_whitelist(self, models: list[ModelMetadata]) -> None:
+        save_openrouter_whitelist(models)
+        self.set_models("openrouter", models)
+
+    async def change_model(self) -> str | None:
+        chatgpt = bool(self.credentials and self.credentials.get("access_token"))
+        if not chatgpt and self.openrouter is None:
+            return "Sign in with /login before choosing a model."
+        if chatgpt and not any(model["provider"] == "chatgpt" for model in self.models):
+            models = await self.wait_for_models(self.discover_chatgpt_models())
+            if models is None:
+                return None
+            self.set_models("chatgpt", models)
+        if not self.models:
+            return "No models yet. Use /model add to add an OpenRouter model."
+        options = {
+            f"{model['provider']}:{model['slug']}": model for model in self.models
+        }
+        try:
+            key = await self.choose_inline(
+                "Choose a model",
+                [
+                    (
+                        key,
+                        f"{model['display_name']} · {PROVIDER_LABELS[model['provider']]}",
+                    )
+                    for key, model in options.items()
+                ],
+                default=f"{self.selected_provider}:{self.selected_model}",
             )
         except asyncio.CancelledError:
             if _task_is_cancelling():
                 raise
-            return
+            return None
+        chosen = options[key]
+        if (
+            chosen["provider"] == self.selected_provider
+            and chosen["slug"] == self.selected_model
+        ):
+            return None
+        return self.select_model(chosen)
 
-        if new_model == self.selected_model:
-            return
+    async def add_openrouter_model(self, query: str) -> str | None:
+        if self.openrouter is None:
+            return "Sign in to OpenRouter with /login before adding a model."
+        catalog = await self.wait_for_models(asyncio.to_thread(list_openrouter_models))
+        if catalog is None:
+            return None
+        whitelist = [
+            model for model in self.models if model["provider"] == "openrouter"
+        ]
+        added = {model["slug"] for model in whitelist}
+        search = query.casefold()
+        matches = [
+            model
+            for model in catalog
+            if model["slug"] not in added
+            and (
+                search in model["slug"].casefold()
+                or search in model["display_name"].casefold()
+            )
+        ]
+        if not matches:
+            return (
+                f'No OpenRouter models match "{query}".'
+                if query
+                else "Every OpenRouter model with tool support is already added."
+            )
+        try:
+            slug = await self.choose_inline(
+                "Add an OpenRouter model",
+                [(model["slug"], model["display_name"]) for model in matches],
+            )
+        except asyncio.CancelledError:
+            if _task_is_cancelling():
+                raise
+            return None
+        model = next(model for model in matches if model["slug"] == slug)
+        whitelist.append(model)
+        self.save_whitelist(whitelist)
+        return (
+            f"Added OpenRouter · {model['display_name']}. Use /model to switch to it."
+        )
 
-        save_model_preference(self.selected_provider, new_model)
-        self.selected_model = new_model
-        self.last_usage = None
-        model_name = model_display_name(self.models, self.selected_model)
-        return f"Model: {provider_name} · {model_name}"
+    async def remove_openrouter_model(self) -> str | None:
+        whitelist = [
+            model for model in self.models if model["provider"] == "openrouter"
+        ]
+        if not whitelist:
+            return "No OpenRouter models to remove."
+        try:
+            slug = await self.choose_inline(
+                "Remove an OpenRouter model",
+                [(model["slug"], model["display_name"]) for model in whitelist],
+            )
+        except asyncio.CancelledError:
+            if _task_is_cancelling():
+                raise
+            return None
+        removed = next(model for model in whitelist if model["slug"] == slug)
+        remaining = [model for model in whitelist if model["slug"] != slug]
+        self.save_whitelist(remaining)
+        message = f"Removed OpenRouter · {removed['display_name']}."
+        if self.selected_provider == "openrouter" and self.selected_model == slug:
+            self.selected_model = None
+            self.last_usage = None
+            if self.models:
+                outcome = await self.change_model()
+                if outcome:
+                    return f"{message} {outcome}"
+        return message
 
     async def run_auth_command(self, text: str) -> None:
         self.loading_model = True
@@ -969,9 +1068,24 @@ class VinApp:
                                 self.transcript.append(
                                     {"role": "notice", "content": outcome}
                                 )
-                        elif text == "/model":
+                        elif parts[0] == "/model":
                             try:
-                                outcome = await self.change_model()
+                                action, _, query = (
+                                    parts[1] if len(parts) > 1 else ""
+                                ).partition(" ")
+                                if not action:
+                                    outcome = await self.change_model()
+                                elif action == "add":
+                                    outcome = await self.add_openrouter_model(
+                                        query.strip()
+                                    )
+                                elif action == "remove" and not query.strip():
+                                    outcome = await self.remove_openrouter_model()
+                                else:
+                                    outcome = Text(
+                                        "Use /model, /model add [search] or /model remove.",
+                                        style="red",
+                                    )
                             except (RuntimeError, OSError, ValueError) as error:
                                 outcome = Text(str(error), style="red")
                             self.transcript.append({"role": "user", "content": text})
@@ -1103,6 +1217,8 @@ class VinApp:
                 "- `/resume [title-or-id]` - Resume a saved conversation\n"
                 "- `/rename <name>` - Rename the current conversation\n"
                 "- `/model` - Set the AI model\n"
+                "- `/model add [search]` - Add an OpenRouter model\n"
+                "- `/model remove` - Remove an OpenRouter model\n"
                 "- `/compact` - Compact the conversation context\n"
                 "- `/settings` - Manage settings\n"
                 "- `/tasks` - View tasks from this conversation\n"
@@ -1165,6 +1281,8 @@ class VinApp:
                 )
             try:
                 self.openrouter = load_openrouter_account()
+                if self.openrouter is not None:
+                    self.set_models("openrouter", load_openrouter_whitelist())
             except RuntimeError as error:
                 self.transcript.append(
                     {"role": "notice", "content": Text(str(error), style="red")}
@@ -1185,7 +1303,9 @@ class VinApp:
             self.selected_provider = "openrouter"
             self.selected_model = (
                 preference["model"]
-                if preference is not None and preference["provider"] == "openrouter"
+                if preference is not None
+                and preference["provider"] == "openrouter"
+                and any(model["slug"] == preference["model"] for model in self.models)
                 else None
             )
             return

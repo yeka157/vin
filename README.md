@@ -1,6 +1,6 @@
 # Vin
 
-Vin is a terminal coding assistant that can explore a project, explain code, edit files, and run commands. Sign in with ChatGPT, choose a model, and describe what you want to do.
+Vin is a terminal coding assistant that can explore a project, explain code, edit files, and run commands. Sign in with ChatGPT or an OpenRouter API key, choose a model, and describe what you want to do.
 
 ![Vin reading a project and summarizing its structure](assets/demo.gif)
 
@@ -11,7 +11,7 @@ Vin is in early development. Development and manual testing currently take place
 
 ## How it works
 
-Vin signs in with your ChatGPT account through the browser (OAuth with PKCE), so it needs no OpenAI API key. Each message you send starts a loop: Vin sends the conversation to the model, the model can call tools, Vin runs them and returns the results, and the loop repeats until the model answers in text. One message allows up to 16 model requests and up to 8 tool calls per request.
+Vin signs in with your ChatGPT account through the browser (OAuth with PKCE), or with an OpenRouter API key you paste into Vin. Both can be signed in at once, and `/model` lists the models from both. Each message you send starts a loop: Vin sends the conversation to the model, the model can call tools, Vin runs them and returns the results, and the loop repeats until the model answers in text. One message allows up to 16 model requests and up to 8 tool calls per request.
 
 The model has four tools:
 
@@ -62,7 +62,7 @@ cd /path/to/your/project
 vin
 ```
 
-On the first launch, follow the browser sign-in steps and choose a ChatGPT model. No OpenAI API key or `.env` file is required. The models available depend on your signed-in account. Vin remembers your account and selected model for later launches.
+On the first launch, choose how to sign in. With ChatGPT, follow the browser sign-in steps and choose a model; the models available depend on your account. With OpenRouter, paste your API key, then pick a model to add from OpenRouter's models that support tools. No `.env` file is required. Vin remembers your accounts and selected model for later launches.
 
 Describe your goal in ordinary language. For example:
 
@@ -80,7 +80,9 @@ Vin shows its progress and tool activity as it works. Completed tool groups coll
 | --- | --- |
 | `/help` | Show available commands |
 | `/user` | Show every signed-in account |
-| `/model` | Choose a model and remember it for future launches |
+| `/model` | Choose a model from every signed-in provider and remember it for future launches |
+| `/model add [search]` | Add an OpenRouter model to your list; the search narrows the choices |
+| `/model remove` | Remove an OpenRouter model from your list |
 | `/login` | Sign in with ChatGPT or an OpenRouter API key |
 | `/logout` | Sign out of the provider in use and clear its saved sign-in |
 | `/clear` | Start a fresh conversation without deleting saved conversations |
@@ -139,8 +141,8 @@ Resuming an interrupted conversation restores its saved progress without rerunni
 | Data | Location |
 | --- | --- |
 | Saved conversations | `~/.local/share/vin/sessions/` |
-| Account credentials and model preference | `~/.config/vin/` |
-| Cached model list | `~/.cache/vin/chatgpt/` |
+| Account credentials, OpenRouter key, model preference and OpenRouter model list | `~/.config/vin/` |
+| Cached ChatGPT model list | `~/.cache/vin/chatgpt/` |
 
 Saved conversations can contain prompts, responses, file contents and command output. Credential files are stored locally with owner-only permissions; they are not encrypted.
 

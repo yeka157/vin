@@ -542,6 +542,7 @@ class InitialModelTests(unittest.TestCase):
             "input_tokens": 1200, "output_tokens": 100, "total_tokens": 1300,
         }
         self.app.last_usage = usage.copy()
+        self.app.models = self.models
 
         self.inline.side_effect = asyncio.CancelledError
         self.assertIsNone(asyncio.run(self.app.change_model()))
@@ -550,12 +551,12 @@ class InitialModelTests(unittest.TestCase):
         self.save.assert_not_called()
 
         self.inline.side_effect = None
-        self.inline.return_value = "old-model"
+        self.inline.return_value = "chatgpt:old-model"
         self.assertIsNone(asyncio.run(self.app.change_model()))
         self.assertEqual(self.app.last_usage, usage)
         self.save.assert_not_called()
 
-        self.inline.return_value = "new-model"
+        self.inline.return_value = "chatgpt:new-model"
         self.save.side_effect = OSError("Could not save preference")
         with self.assertRaisesRegex(OSError, "Could not save preference"):
             asyncio.run(self.app.change_model())
@@ -594,7 +595,7 @@ class ModelCommandTests(unittest.TestCase):
         self.catalog = Mock(return_value=self.models)
         self.load = Mock(return_value={"provider": "chatgpt", "model": "old-model"})
         self.choose = Mock(return_value="new-model")
-        self.inline = AsyncMock(return_value="new-model")
+        self.inline = AsyncMock(return_value="chatgpt:new-model")
         self.save = Mock()
         self.cached = Mock(return_value=self.models)
         self.cache_save = Mock()
@@ -830,9 +831,9 @@ class ModelCommandTests(unittest.TestCase):
         self.catalog.assert_called_once_with(self.credentials)
         self.cache_save.assert_called_once_with(self.credentials, self.models)
         self.inline.assert_awaited_once_with(
-            "Choose a ChatGPT model",
-            [("old-model", "Old Model"), ("new-model", "New Model")],
-            default="old-model",
+            "Choose a model",
+            [("chatgpt:old-model", "Old Model · ChatGPT"), ("chatgpt:new-model", "New Model · ChatGPT")],
+            default="chatgpt:old-model",
         )
         self.save.assert_called_once_with("chatgpt", "new-model")
         self.assert_model_indicator(" ChatGPT · New Model")
@@ -1179,7 +1180,7 @@ class ModelCommandTests(unittest.TestCase):
     def test_model_command_opens_picker_and_saves_selection(self) -> None:
         async def pick(message: str, options: Sequence[tuple[str, str]], default: str | None = None) -> str:
             self.assertEqual(len(self.vin_app.transcript), 1)
-            return "new-model"
+            return "chatgpt:new-model"
 
         def save(provider: str, model: str) -> None:
             self.assertEqual(len(self.vin_app.transcript), 1)
@@ -1190,9 +1191,9 @@ class ModelCommandTests(unittest.TestCase):
 
         self.choose.assert_not_called()
         self.inline.assert_awaited_once_with(
-            "Choose a ChatGPT model",
-            [("old-model", "Old Model"), ("new-model", "New Model")],
-            default="old-model",
+            "Choose a model",
+            [("chatgpt:old-model", "Old Model · ChatGPT"), ("chatgpt:new-model", "New Model · ChatGPT")],
+            default="chatgpt:old-model",
         )
         self.save.assert_called_once_with("chatgpt", "new-model")
         self.catalog.assert_not_called()
@@ -1436,6 +1437,29 @@ class ModelCommandTests(unittest.TestCase):
         self.save.assert_not_called()
         self.assertEqual(mock_run(self.vin_app.app).await_count, 1)
 
+
+    def test_model_subcommands_reach_add_and_remove(self) -> None:
+        cases: list[tuple[str, str, tuple[str, ...]]] = [
+            ("/model add claude opus", "add_openrouter_model", ("claude opus",)),
+            ("/model add", "add_openrouter_model", ("",)),
+            ("/model remove", "remove_openrouter_model", ()),
+        ]
+        for command, method, arguments in cases:
+            with self.subTest(command=command):
+                with patch.object(vin.VinApp, method, AsyncMock(return_value="done")) as handler:
+                    self.run_chat([command, "/quit"])
+                handler.assert_awaited_once_with(*arguments)
+                entries = transcript_entries(self.session)
+                self.assertEqual(entries[-2:], [{"role": "user", "content": command},
+                                                {"role": "notice", "content": "done"}])
+                self.save.assert_not_called()
+
+    def test_unknown_model_subcommand_shows_usage(self) -> None:
+        for command in ("/model list", "/model remove extra"):
+            with self.subTest(command=command):
+                self.run_chat([command, "/quit"])
+                self.assert_error_notice("Use /model, /model add [search] or /model remove.", command=command)
+                self.inline.assert_not_awaited()
 
     def test_failed_model_save_returns_to_input(self) -> None:
         self.save.side_effect = RuntimeError("Could not save model preference")

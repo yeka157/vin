@@ -211,6 +211,9 @@ class SignInTests(unittest.IsolatedAsyncioTestCase):
         self.ask = self.enterContext(patch.object(self.vin, "ask_secret", AsyncMock(return_value=KEY)))
         self.check = self.enterContext(patch.object(app_module, "check_openrouter_key", return_value=ACCOUNT))
         self.save = self.enterContext(patch.object(app_module, "save_openrouter_account"))
+        self.whitelist = self.enterContext(patch.object(app_module, "load_openrouter_whitelist", return_value=[]))
+        self.add = self.enterContext(patch.object(self.vin, "add_openrouter_model", AsyncMock(return_value=None)))
+        self.change = self.enterContext(patch.object(self.vin, "change_model", AsyncMock(return_value=None)))
 
     async def test_valid_key_is_saved_and_openrouter_becomes_the_provider(self) -> None:
         self.vin.credentials = fixture_credentials()
@@ -225,6 +228,38 @@ class SignInTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.vin.models, [CHATGPT_MODEL])
         self.assertEqual(self.vin.credentials, fixture_credentials())
         self.assertEqual(notices(self.vin.transcript), ["Signed in to OpenRouter · laptop."])
+
+    async def test_first_sign_in_opens_add_then_the_model_picker(self) -> None:
+        self.add.return_value = "Added OpenRouter · Coder. Use /model to switch to it."
+        self.change.return_value = "Model: OpenRouter · Coder"
+        self.vin.models = []
+
+        async def add(query: str) -> str:
+            self.vin.models = [OPENROUTER_MODEL]
+            return "Added OpenRouter · Coder. Use /model to switch to it."
+        self.add.side_effect = add
+
+        await self.vin.sign_in_openrouter()
+
+        self.add.assert_awaited_once_with("")
+        self.change.assert_awaited_once_with()
+        self.assertEqual(notices(self.vin.transcript), [
+            "Signed in to OpenRouter · laptop.",
+            "Added OpenRouter · Coder. Use /model to switch to it.",
+            "Model: OpenRouter · Coder"])
+
+    async def test_saved_list_skips_add_and_opens_the_model_picker(self) -> None:
+        self.whitelist.return_value = [OPENROUTER_MODEL]
+        await self.vin.sign_in_openrouter()
+        self.add.assert_not_awaited()
+        self.change.assert_awaited_once_with()
+        self.assertEqual(self.vin.models, [CHATGPT_MODEL, OPENROUTER_MODEL])
+
+    async def test_cancelled_add_with_no_models_opens_no_picker(self) -> None:
+        self.vin.models = []
+        await self.vin.sign_in_openrouter()
+        self.add.assert_awaited_once_with("")
+        self.change.assert_not_awaited()
 
     async def test_key_without_label_signs_in_without_one(self) -> None:
         self.check.return_value = {"key": KEY, "label": ""}
@@ -343,6 +378,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.multiple(
             app_module, load_openrouter_account=self.account, load_model_preference=self.preference,
             load_active_session=self.session, load_cached_chatgpt_models=Mock(return_value=[CHATGPT_MODEL]),
+            load_openrouter_whitelist=Mock(return_value=[OPENROUTER_MODEL]),
             load_subagent_settings=Mock(return_value={"enabled": True, "budget": 8})))
 
     async def test_saved_key_and_openrouter_choice_start_on_openrouter(self) -> None:
@@ -350,6 +386,12 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.vin.openrouter, ACCOUNT)
         self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("openrouter", "acme/coder"))
         self.inline.assert_not_awaited()
+
+    async def test_saved_choice_no_longer_on_the_list_starts_with_no_model(self) -> None:
+        self.preference.return_value = {"provider": "openrouter", "model": "acme/removed"}
+        await self.vin.initialize_session()
+        self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("openrouter", None))
+        self.assertEqual(self.vin.models, [OPENROUTER_MODEL])
 
     async def test_saved_key_without_a_choice_starts_on_openrouter_with_no_model(self) -> None:
         self.preference.return_value = None
@@ -362,7 +404,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         self.session.return_value = fixture_credentials()
         await self.vin.initialize_session()
         self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("chatgpt", "gpt"))
-        self.assertEqual(self.vin.models, [CHATGPT_MODEL])
+        self.assertEqual(self.vin.models, [OPENROUTER_MODEL, CHATGPT_MODEL])
         self.assertEqual(self.vin.openrouter, ACCOUNT)
 
     async def test_chatgpt_choice_falls_back_to_openrouter_when_chatgpt_is_signed_out(self) -> None:

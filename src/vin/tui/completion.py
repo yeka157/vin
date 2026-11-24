@@ -17,6 +17,19 @@ class SessionCompleter(Completer):
         text = document.text_before_cursor
         parts = text.split(maxsplit=1)
 
+        if parts and parts[0] == "/model" and (len(parts) > 1 or text[-1:].isspace()):
+            word = parts[1] if len(parts) > 1 else ""
+            if " " not in word:
+                for option, meta in (
+                    ("add", "Add an OpenRouter model"),
+                    ("remove", "Remove an OpenRouter model"),
+                ):
+                    if option.startswith(word):
+                        yield Completion(
+                            option, start_position=-len(word), display_meta=meta
+                        )
+            return
+
         if (
             not parts
             or parts[0] != "/resume"

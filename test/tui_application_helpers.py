@@ -65,6 +65,7 @@ def patch_tui(module: ModuleType, *, create: bool = False, **replacements: objec
     owners = {"PromptSession": layout, "Application": layout, "Console": transcript_ui}
     # Startup reads files in ~/.config/vin; keep tests off the real ones unless a test replaces them.
     replacements = {"load_openrouter_account": Mock(return_value=None),
+                    "load_openrouter_whitelist": Mock(return_value=[]),
                     "load_subagent_settings": Mock(side_effect=lambda: DEFAULT_SUBAGENT_SETTINGS.copy())} | replacements
     with ExitStack() as stack:
         for name, value in replacements.items():

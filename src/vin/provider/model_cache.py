@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from typing import cast
-from vin.types import ModelMetadata, is_record, is_list
+from vin.types import ModelMetadata, Provider, is_record, is_list
 
 import json
 from hashlib import sha256
@@ -22,7 +22,7 @@ def _cache_path(credentials: Mapping[str, object] | None) -> Path:
     return MODEL_CACHE_DIR / f"{account_key}.json"
 
 
-def _model_metadata(models: object) -> list[ModelMetadata]:
+def parse_models(models: object, provider: Provider) -> list[ModelMetadata]:
     if not is_list(models):
         raise ValueError("Invalid model cache")
 
@@ -37,7 +37,7 @@ def _model_metadata(models: object) -> list[ModelMetadata]:
         metadata: ModelMetadata = {
             "slug": cast(str, model["slug"]),
             "display_name": cast(str, model["display_name"]),
-            "provider": "chatgpt",
+            "provider": provider,
         }
         window = model.get("context_window")
         if type(window) is int and window > 0:
@@ -54,7 +54,7 @@ def load_cached_chatgpt_models(
         payload = cast(
             object, json.loads(_cache_path(credentials).read_text(encoding="utf-8"))
         )
-        return _model_metadata(payload)
+        return parse_models(payload, "chatgpt")
     except (OSError, ValueError):
         return []
 
@@ -63,7 +63,7 @@ def save_cached_chatgpt_models(
     credentials: Mapping[str, object] | None, models: object
 ) -> None:
     try:
-        metadata = _model_metadata(models)
+        metadata = parse_models(models, "chatgpt")
         save_private_json(_cache_path(credentials), metadata)
     except (OSError, ValueError, RuntimeError):
         pass

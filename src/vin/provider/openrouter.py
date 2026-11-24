@@ -1,11 +1,19 @@
+import json
+from pathlib import Path
 from queue import SimpleQueue
 from threading import Event
+
+from urllib.error import HTTPError, URLError
 from vin.agent import AgentError, run_reply
+from vin.auth.credentials import save_private_json
 from vin.provider.events import EventSender, ReplyEvent, make_senders
-from vin.types import History
+from vin.provider.model_cache import parse_models
+from vin.types import History, ModelMetadata
 from vin.provider.prompts import instructions
 from vin.types import is_list, is_record
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
+from http.client import HTTPResponse
+from urllib.request import urlopen
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -270,3 +278,70 @@ def stream_openrouter_response(
         subagents=subagents,
         subagent_budget=subagent_budget,
     )
+
+
+CATALOG_URL = "https://openrouter.ai/api/v1/models"
+WHITELIST_PATH = Path.home() / ".config" / "vin" / "openrouter_models.json"
+
+
+def list_openrouter_models() -> list[ModelMetadata]:
+    try:
+        with cast(HTTPResponse, urlopen(CATALOG_URL, timeout=15)) as response:
+            body = cast(object, json.load(response))
+    except HTTPError as error:
+        raise RuntimeError(
+            f"Could not load OpenRouter models (HTTP {error.code})."
+        ) from None
+    except (URLError, TimeoutError, OSError):
+        raise RuntimeError("Could not connect to OpenRouter.") from None
+    except ValueError:
+        raise RuntimeError("OpenRouter returned an invalid model list.") from None
+
+    data = body.get("data") if is_record(body) else None
+    if not is_list(data):
+        raise RuntimeError("OpenRouter returned an invalid model list.")
+
+    models: list[ModelMetadata] = []
+    for entry in data:
+        if (
+            is_record(entry)
+            and isinstance(slug := entry.get("id"), str)
+            and slug.strip()
+            and is_list(parameters := entry.get("supported_parameters"))
+            and "tools" in parameters
+        ):
+            name = entry.get("name")
+            model: ModelMetadata = {
+                "slug": slug,
+                "display_name": (
+                    name if isinstance(name, str) and name.strip() else slug
+                ),
+                "provider": "openrouter",
+            }
+            window = entry.get("context_length")
+            if type(window) is int and window > 0:
+                model["context_window"] = window
+
+            models.append(model)
+    return models
+
+
+def load_openrouter_whitelist() -> list[ModelMetadata]:
+    try:
+        payload = cast(object, json.loads(WHITELIST_PATH.read_text(encoding="utf-8")))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        raise RuntimeError("Could not read saved OpenRouter models.") from None
+
+    try:
+        return parse_models(payload, "openrouter")
+    except ValueError:
+        raise RuntimeError("Saved OpenRouter models are invalid.") from None
+
+
+def save_openrouter_whitelist(models: list[ModelMetadata]) -> None:
+    try:
+        save_private_json(WHITELIST_PATH, models)
+    except (OSError, RuntimeError):
+        raise RuntimeError("Could not save OpenRouter models.") from None
