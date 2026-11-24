@@ -10,13 +10,21 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from rich.console import Console
-from rich.markdown import Markdown
+from rich.markdown import Markdown, Heading
 from rich.padding import Padding
 from rich.text import Text
 
 from vin.tui.diff import print_diff as print_tool_diff
 from vin.tui.diff import format_edit_heading
 from vin.types import NoticeEntry, ToolEntry, TranscriptEntry
+
+
+class LeftHeading(Heading):
+    LEVEL_ALIGN = {tag: "left" for tag in Heading.LEVEL_ALIGN}
+
+
+class LeftMarkdown(Markdown):
+    elements = {**Markdown.elements, "heading_open": LeftHeading}
 
 
 class ToolGroup(TypedDict):
@@ -59,7 +67,7 @@ def print_assistant_message(
     streaming: bool = False,
     intermediate: bool = False,
 ) -> None:
-    content = Text(text) if streaming else Markdown(text, code_theme="ansi_dark")
+    content = Text(text) if streaming else LeftMarkdown(text, code_theme="ansi_dark")
     console.print(
         Padding(content, (0, 0, 0, 1)),
     )
