@@ -3,10 +3,10 @@ from threading import Event
 import json
 import re
 from typing import Callable, Literal, cast
-from vin.types import History, is_record, is_list
+from vin.types import History, ProviderItem, is_record, is_list
 from vin.provider.events import EventSender
 
-type RequestFn = Callable[[History, EventSender, bool], tuple[History, bool] | None]
+type RequestFn = Callable[[History, EventSender, bool, bool], tuple[History, bool] | None]
 
 type SubagentSender = Callable[[str], EventSender]
 
@@ -98,12 +98,39 @@ def execute_tool(
         return output
 
 
-def context_after_compaction(history: History) -> History:
-    for index in range(len(history) - 1, -1, -1):
-        item = history[index]
-        if item.get("type") == "compaction":
-            return history[index:]
-    return history.copy()
+SUMMARY_PREFIX = "Summary of the conversation so far:\n\n"
+
+
+def quiet(_kind: str, _value: object) -> None:
+    return
+
+
+def estimate_tokens(history: History) -> int:
+    return len(json.dumps(history)) // 3
+
+
+def is_summary(item: ProviderItem) -> bool:
+    content = item.get("content")
+    return item.get("role") == "user" and isinstance(content, str) and content.startswith(SUMMARY_PREFIX)
+
+
+def compact_history(request: RequestFn, history: History, cancel_event: Event, *, subagent: bool, keep_last_user: bool) -> History | None:
+    if cancel_event.is_set():
+        return None
+    completed = request(history, quiet, subagent, True)
+    if completed is None:
+        return None
+    output = completed[0]
+    if any(item.get("type") == "function_call" for item in output):
+        raise AgentError("Compaction returned unexpected tool calls.")
+    summary = final_answer(output)
+    if not summary.strip():
+        raise AgentError("Compaction returned no summary. Please try again.")
+    compacted: History = [{"role": "user", "content": SUMMARY_PREFIX + summary}]
+    last_user = next((item for item in reversed(history) if item.get("role") == "user"), None)
+    if keep_last_user and last_user is not None:
+        compacted.append(last_user)
+    return compacted
 
 
 def run_agent_turn(
@@ -113,6 +140,7 @@ def run_agent_turn(
     cancel_event: Event,
     *,
     compact_only: bool = False,
+    compact_threshold: int | None = None,
     subagent: bool = False,
     max_requests: int = 16,
     subagent_budget: int = 8,
@@ -121,11 +149,27 @@ def run_agent_turn(
 ) -> History | None:
     history = list(inputs)
 
+    if compact_only:
+        return compact_history(
+            request, history, cancel_event, subagent=subagent, keep_last_user=False
+        )
+
     for _ in range(max_requests):
         if cancel_event.is_set():
             return None
+        if (
+            compact_threshold is not None
+            and len(history) > 2
+            and estimate_tokens(history) >= compact_threshold
+        ):
+            compacted = compact_history(
+                request, history, cancel_event, subagent=subagent, keep_last_user=True
+            )
+            if compacted is None:
+                return None
+            history = compacted
 
-        completed = request(history, send, subagent)
+        completed = request(history, send, subagent, False)
 
         if completed is None:
             return None
@@ -134,9 +178,6 @@ def run_agent_turn(
 
         calls = [item for item in output if item.get("type") == "function_call"]
 
-        if compact_only and calls:
-            raise AgentError("Compaction returned unexpected tool calls.")
-
         if len(calls) > 8:
             raise AgentError("Tool call limit exceeded: maximum 8.")
 
@@ -144,14 +185,6 @@ def run_agent_turn(
             raise AgentError("Response contains an incomplete tool call.")
 
         history.extend(output)
-
-        has_compaction = any(item.get("type") == "compaction" for item in output)
-
-        if has_compaction:
-            history = context_after_compaction(history)
-
-        if compact_only:
-            return history if has_compaction else None
 
         if not calls:
             if not has_text:
@@ -237,6 +270,7 @@ def run_reply(
     *,
     error_message: ErrorMessage,
     compact_only: bool = False,
+    compact_threshold: int | None = None,
     subagents: bool = True,
     subagent_budget: int = 8,
 ) -> None:
@@ -248,6 +282,7 @@ def run_reply(
                 send,
                 cancel_event,
                 compact_only=compact_only,
+                compact_threshold=compact_threshold,
                 subagent_sender=subagent_send,
                 subagents=subagents,
                 subagent_budget=subagent_budget,
@@ -317,9 +352,6 @@ def run_task(
             "prompt": prompt,
         },
     )
-
-    def quiet(_kind: str, _value: object) -> None:
-        return
 
     child = subagent_sender(call_id) if subagent_sender is not None else quiet
 

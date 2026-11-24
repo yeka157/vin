@@ -9,12 +9,9 @@ from typing import (
     TYPE_CHECKING,
     Literal,
     Protocol,
-    TypedDict,
     cast,
     runtime_checkable,
 )
-
-from openai.types.responses.response_create_params import ContextManagement
 
 from vin.agent import AgentError, run_reply
 from vin.provider.prompts import instructions
@@ -38,10 +35,6 @@ if TYPE_CHECKING:
     from openai.types.shared_params import Reasoning
 
 
-class CompactionOptions(TypedDict, total=False):
-    context_management: list["ContextManagement"]
-
-
 class WireResponses(Protocol):
     def create(
         self,
@@ -54,7 +47,6 @@ class WireResponses(Protocol):
         include: list["ResponseIncludable"],
         store: bool,
         stream: Literal[True],
-        context_management: list["ContextManagement"] = ...,
     ) -> AbstractContextManager[Iterable["ResponseStreamEvent"]]: ...
 
 
@@ -146,7 +138,6 @@ def _request_response(
     send: EventSender,
     cancel_event: Event,
     *,
-    compact_threshold: int | None = None,
     compact_only: bool = False,
     subagent: bool = False,
     task: bool = True,
@@ -160,15 +151,6 @@ def _request_response(
     completed_output: dict[int, "ResponseOutputItem"] = {}
     added_output: set[int] = set()
 
-    options: CompactionOptions = {}
-    if compact_threshold is not None:
-        options["context_management"] = [
-            {
-                "type": "compaction",
-                "compact_threshold": compact_threshold,
-            }
-        ]
-
     with client.responses.create(
         model=model,
         input=inputs,
@@ -180,7 +162,6 @@ def _request_response(
         include=["reasoning.encrypted_content"],
         store=False,
         stream=True,
-        **options,
     ) as stream:
         if cancel_event.is_set():
             return None
@@ -301,7 +282,7 @@ def stream_chatgpt_response(
 ) -> None:
     """Run on a worker thread; publish text, complete, or error queue events."""
 
-    send, subagent_send = make_senders(events, cancel_event, compact_only=compact_only)
+    send, subagent_send = make_senders(events, cancel_event)
 
     if cancel_event.is_set():
         return
@@ -332,7 +313,7 @@ def stream_chatgpt_response(
     wire = _wire_client(client)
 
     def request(
-        history: History, sender: EventSender, subagent: bool
+        history: History, sender: EventSender, subagent: bool, compact: bool
     ) -> tuple[History, bool] | None:
         completed = _request_response(
             wire,
@@ -340,8 +321,7 @@ def stream_chatgpt_response(
             history,
             sender,
             cancel_event,
-            compact_threshold=compact_threshold,
-            compact_only=compact_only,
+            compact_only=compact,
             subagent=subagent,
             task=subagents,
         )
@@ -371,6 +351,7 @@ def stream_chatgpt_response(
         cancel_event,
         error_message=lambda error: _error_message(error, access_token),
         compact_only=compact_only,
+        compact_threshold=compact_threshold,
         subagents=subagents,
         subagent_budget=subagent_budget,
     )

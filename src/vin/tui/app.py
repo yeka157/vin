@@ -25,6 +25,7 @@ from rich.console import RenderableType
 from rich.padding import Padding
 from rich.text import Text
 
+from vin.agent import is_summary
 from vin.auth.chatgpt import (
     TokenExchangeError,
     login_with_chatgpt,
@@ -502,10 +503,11 @@ class VinApp:
                         compact_threshold = window * 4 // 5
                     break
 
-            if compact_only:
-                compact_threshold = 1024
-
-            if compact_threshold is None and self.selected_model is not None:
+            if (
+                compact_threshold is None
+                and self.selected_model is not None
+                and not compact_only
+            ):
                 notice = (
                     "Automatic compaction is off because this model's "
                     "context limit is unknown."
@@ -645,10 +647,10 @@ class VinApp:
                             ]
                         )
                     else:
-                        newly_compacted = any(
-                            item.get("type") == "compaction"
-                            and item not in self.messages
-                            for item in value
+                        newly_compacted = (
+                            bool(value)
+                            and is_summary(value[0])
+                            and value[0] not in self.messages
                         )
                         self.messages[:] = value
                         if newly_compacted:

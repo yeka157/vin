@@ -66,7 +66,7 @@ class SetMarker(Protocol):
 
 
 def make_senders(
-    events: SimpleQueue[ReplyEvent], cancel_event: Event, *, compact_only: bool
+    events: SimpleQueue[ReplyEvent], cancel_event: Event
 ) -> tuple[EventSender, Callable[[str], EventSender]]:
     def make_send(put: Callable[[ReplyEvent], None]) -> EventSender:
         @overload
@@ -86,8 +86,6 @@ def make_senders(
                 if isinstance(marker, SetMarker):
                     marker.set()
             if cancel_event.is_set():
-                return
-            if compact_only and kind == "text":
                 return
             if kind in ("text", "tool_diff", "error", "rate_limit") and isinstance(
                 value, str

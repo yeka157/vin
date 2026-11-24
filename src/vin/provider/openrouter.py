@@ -231,7 +231,7 @@ def stream_openrouter_response(
     subagents: bool = True,
     subagent_budget: int = 8,
 ) -> None:
-    send, subagent_send = make_senders(events, cancel_event, compact_only=compact_only)
+    send, subagent_send = make_senders(events, cancel_event)
     if cancel_event.is_set():
         return
     key = account.get("key") if is_record(account) else None
@@ -253,7 +253,7 @@ def stream_openrouter_response(
     )
 
     def request(
-        history: History, sender: EventSender, subagent: bool
+        history: History, sender: EventSender, subagent: bool, compact: bool
     ) -> tuple[History, bool] | None:
         return _request_completion(
             client,
@@ -261,7 +261,7 @@ def stream_openrouter_response(
             history,
             sender,
             cancel_event,
-            compact_only=compact_only,
+            compact_only=compact,
             subagent=subagent,
             task=subagents,
         )
@@ -275,6 +275,7 @@ def stream_openrouter_response(
         cancel_event,
         error_message=_error_message,
         compact_only=compact_only,
+        compact_threshold=compact_threshold,
         subagents=subagents,
         subagent_budget=subagent_budget,
     )

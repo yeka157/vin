@@ -49,6 +49,8 @@ from provider_typing_helpers import (
     WireItemDone,
     credentials as fixture_credentials,
 )
+from vin import agent
+from vin.provider import prompts
 from vin.provider.chatgpt import stream_chatgpt_response
 from vin.provider.events import ReplyEvent, ReplyEvents
 import vin.tui as tui
@@ -182,7 +184,6 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assertEqual(self.input, [{'role': 'user', 'content': 'Inspect the workspace.'}])
 
     def test_subagent_request_uses_its_own_prompt_tools_and_input(self) -> None:
-        from vin.provider import prompts
         arguments = '{"description":"Find sessions","prompt":"Find where sessions are saved."}'
         events = self.run_stream([
             [completed([call('task', arguments, 'call_task')])],
@@ -206,7 +207,7 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assertIn(('text', 'Done'), events)
         self.assertEqual(self.executions, [])
 
-    def test_compaction_threshold_is_forwarded_to_every_model_request(self) -> None:
+    def test_no_request_uses_server_side_context_management(self) -> None:
         events = self.run_stream([
             [completed([call()])],
             [delta(), completed([message()])],
@@ -214,57 +215,30 @@ class AgentLoopHTTPTests(unittest.TestCase):
 
         self.assertEqual(len(self.requests), 2)
         for request in self.requests:
-            self.assertEqual(request.get('context_management'), [
-                {'type': 'compaction', 'compact_threshold': 400000},
-            ])
+            self.assertNotIn('context_management', request)
+            self.assertNotEqual(request['instructions'], prompts.COMPACTION_PROMPT)
         self.assertEqual(events[-1][0], 'complete')
 
-    def test_manual_mode_omits_tool_schemas_and_preserves_supplied_input(self) -> None:
+    def test_manual_mode_sends_a_toolless_summary_request_and_keeps_only_the_summary(self) -> None:
         original = deepcopy(self.input)
-        self.run_stream([[delta(), completed([message()])]], compact_threshold=1024, compact_only=True)
+        events = self.run_stream([[delta('Goal: inspect.'), completed([message('Goal: inspect.')])]],
+                                 compact_only=True)
 
         request, = self.requests
         self.assertEqual(request['tools'], [])
         self.assertEqual(request['input'], original)
-        self.assertEqual(request.get('context_management'), [
-            {'type': 'compaction', 'compact_threshold': 1024},
-        ])
+        self.assertEqual(request['instructions'], prompts.COMPACTION_PROMPT)
+        self.assertNotIn('context_management', request)
+        self.assertEqual(events, [('complete', [
+            {'role': 'user', 'content': agent.SUMMARY_PREFIX + 'Goal: inspect.'}])])
         self.assertEqual(self.executions, [])
         self.assertEqual(self.input, original)
 
-    def test_manual_checkpoint_can_complete_without_assistant_text(self) -> None:
-        checkpoint = compaction()
+    def test_manual_summary_without_text_fails_and_keeps_context(self) -> None:
         original = deepcopy(self.input)
-        events = self.run_stream([[item_done(checkpoint), completed([])]],
-                                 compact_threshold=1024, compact_only=True)
+        events = self.run_stream([[item_done(reasoning()), completed([reasoning()])]], compact_only=True)
 
-        self.assertEqual(events, [('complete', [checkpoint])])
-        self.assertEqual(len(self.requests), 1)
-        self.assertEqual(self.executions, [])
-        self.assertEqual(self.input, original)
-
-    def test_manual_checkpoint_keeps_native_output_without_publishing_maintenance_text(self) -> None:
-        checkpoint = compaction()
-        events = self.run_stream([
-            [item_done(checkpoint), delta('Maintenance'), item_done(message('Maintenance'), 1), completed([])],
-        ], compact_threshold=1024, compact_only=True)
-
-        self.assertEqual([event[0] for event in events], ['complete'])
-        context = events[0][1]
-        assert isinstance(context, list)
-        self.assertEqual(context[0], checkpoint)
-        self.assert_subset(message('Maintenance'), context[1])
-        self.assertEqual(len(self.requests), 1)
-        self.assertEqual(self.executions, [])
-
-    def test_manual_response_without_checkpoint_is_a_quiet_noop(self) -> None:
-        original = deepcopy(self.input)
-        events = self.run_stream([[delta('Maintenance'), completed([message('Maintenance')])]],
-                                 compact_threshold=1024, compact_only=True)
-
-        self.assertEqual(events, [('complete', None)])
-        self.assertEqual(len(self.requests), 1)
-        self.assertEqual(self.executions, [])
+        self.assertEqual(events, [('error', 'Compaction returned no summary. Please try again.')])
         self.assertEqual(self.input, original)
 
     def test_manual_unexpected_tool_call_fails_without_execution_or_continuation(self) -> None:
@@ -299,30 +273,30 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assertIn(('tool_started', {'name': 'read', 'detail': 'f'}), events)
         self.assertIn(('tool_finished', 'read'), events)
 
-    def test_native_checkpoint_replaces_prefix_before_tools_and_followup(self) -> None:
-        checkpoint: ResponseCompactionItemParamParam = {
-            'type': 'compaction', 'id': 'cmp_test', 'encrypted_content': 'fake-opaque-context',
-        }
-        original = deepcopy(self.input)
+    def test_automatic_compaction_runs_before_a_request_over_the_threshold(self) -> None:
+        self.input = [
+            {'role': 'user', 'content': 'Old request ' + 'x' * 3000},
+            {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'Old answer'}]},
+            {'role': 'user', 'content': 'Continue the task'},
+        ]
         events = self.run_stream([
-            [item_done(checkpoint), item_done(call(), 1), completed([])],
-            [delta(), completed([message()])],
-        ])
+            [delta('Summary text'), completed([message('Summary text')])],
+            [delta('Continuing'), completed([message('Continuing')])],
+        ], compact_threshold=500)
 
         self.assertEqual(len(self.requests), 2)
-        replay = self.requests[1]['input']
-        self.assertEqual(len(replay), 3)
-        self.assertEqual(replay[0], checkpoint)
-        self.assert_subset(call(), replay[1])
-        self.assertEqual(replay[2], {
-            'type': 'function_call_output', 'call_id': 'call_1', 'output': 'tool result',
-        })
-        self.assertEqual(len(self.executions), 1)
+        summary_request, follow_up = self.requests
+        self.assertEqual(summary_request['tools'], [])
+        self.assertEqual(summary_request['instructions'], prompts.COMPACTION_PROMPT)
+        self.assertEqual(follow_up['input'], [
+            {'role': 'user', 'content': agent.SUMMARY_PREFIX + 'Summary text'},
+            {'role': 'user', 'content': 'Continue the task'},
+        ])
+        self.assertNotIn(('text', 'Summary text'), events)
+        self.assertIn(('text', 'Continuing'), events)
         complete = next(event[1] for event in events if event[0] == 'complete')
         assert complete is not None
-        self.assertEqual(complete[:3], replay)
-        self.assertEqual(len(complete), 4)
-        self.assertEqual(self.input, original)
+        self.assertEqual(complete[:2], follow_up['input'])
 
     def test_existing_checkpoint_does_not_prune_without_new_compaction_output(self) -> None:
         self.input = [

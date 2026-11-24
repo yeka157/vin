@@ -19,6 +19,7 @@ from prompt_toolkit.output import DummyOutput
 from rich.markdown import Markdown
 from rich.text import Text
 
+from vin.agent import SUMMARY_PREFIX
 from vin.sessions import storage
 from vin.sessions.records import new_session, snapshot_session
 from vin.tui import app, conversations
@@ -449,13 +450,13 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
                 self.owner.models = [model]
                 self.owner.selected_model = "chosen"
                 before = deepcopy(self.owner.transcript)
-                context: History = [{"type": "compaction", "id": "cmp_manual", "encrypted_content": "fake-context"}]
+                context: History = [{"role": "user", "content": SUMMARY_PREFIX + "Goal and remaining work."}]
 
                 self.assertIsNone(await self.run_turn([("complete", context)], compact_only=True))
 
                 self.assertEqual(self.request_contexts, [self.previous])
                 self.assertEqual(self.request_modes, [True])
-                self.assertEqual(self.request_thresholds, [1024])
+                self.assertEqual(self.request_thresholds, [None if window is None else 400000])
                 self.assertEqual(self.saved()["messages"], context)
                 self.assertEqual(self.owner.transcript[:len(before)], before)
                 self.assertFalse(any(row["role"] == "assistant" for row in self.owner.transcript))
@@ -629,7 +630,8 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         })
         previous_transcript = deepcopy(self.owner.transcript)
         context: History = [
-            {"type": "compaction", "id": "cmp_new", "encrypted_content": "fake-opaque-context"},
+            {"role": "user", "content": SUMMARY_PREFIX + "Goal and remaining work."},
+            {"role": "user", "content": self.prompt},
             {"role": "assistant", "content": "Final response"},
         ]
 
@@ -651,9 +653,21 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(entry["role"] == "notice" and entry["content"] == "Conversation compacted."
                              for entry in self.owner.transcript), 1)
 
+    async def test_first_reply_of_a_fresh_conversation_is_not_a_compaction(self) -> None:
+        self.owner.messages = []
+        context: History = [
+            {"role": "user", "content": self.prompt},
+            {"role": "assistant", "content": "Final response"},
+        ]
+
+        self.assertIsNone(await self.run_turn([("text", "Final response"), ("complete", context)]))
+
+        self.assertFalse(any(entry["role"] == "notice" and entry["content"] == "Conversation compacted."
+                             for entry in self.owner.transcript))
+
     async def test_existing_compaction_does_not_repeat_completion_notice(self) -> None:
         self.owner.messages = [
-            {"type": "compaction", "id": "cmp_existing", "encrypted_content": "fake-saved-context"},
+            {"role": "user", "content": SUMMARY_PREFIX + "Earlier work."},
             {"role": "assistant", "content": "Previous answer"},
         ]
         context: History = deepcopy(self.owner.messages) + [

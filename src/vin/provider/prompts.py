@@ -1,7 +1,5 @@
 COMPACTION_PROMPT = (
-    "Compact the supplied conversation for later continuation. "
-    "Preserve its goal, constraints, decisions, and unfinished work. "
-    "Do not continue the task or call tools."
+    "Summarize the conversation so far so the work can continue from the summary alone. Include the current goal, the user's constraints and preferences, decisions made, relevant files, checks run and their results, and the remaining work. Write only the summary. Do not continue the task or call tools."
 )
 
 

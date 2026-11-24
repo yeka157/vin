@@ -20,7 +20,7 @@ class ProviderNeutralLoopTests(unittest.TestCase):
         seen: list[History] = []
         replies = iter([(call, False), (answer, True)])
 
-        def request(history: History, _sender: EventSender, _subagent: bool) -> tuple[History, bool] | None:
+        def request(history: History, _sender: EventSender, _subagent: bool, _compact: bool) -> tuple[History, bool] | None:
             seen.append(list(history))
             return next(replies)
 
@@ -81,7 +81,7 @@ class TaskToolTests(unittest.TestCase):
     ) -> History | None:
         replies = iter(parent)
 
-        def request(history: History, sender: EventSender, subagent: bool) -> tuple[History, bool] | None:
+        def request(history: History, sender: EventSender, subagent: bool, _compact: bool) -> tuple[History, bool] | None:
             if subagent:
                 self.child_seen.append(list(history))
                 return child(history, sender)
@@ -172,7 +172,7 @@ class TaskToolTests(unittest.TestCase):
     def test_task_is_not_run_when_subagents_are_off(self) -> None:
         replies = iter([(task_call(), False), (answer("Done"), True)])
 
-        def request(history: History, _sender: EventSender, subagent: bool) -> tuple[History, bool] | None:
+        def request(history: History, _sender: EventSender, subagent: bool, _compact: bool) -> tuple[History, bool] | None:
             self.assertFalse(subagent)
             self.parent_seen.append(list(history))
             return next(replies)
