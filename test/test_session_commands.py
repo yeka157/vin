@@ -1,4 +1,4 @@
-"""Session commands with temporary storage and no provider calls."""
+"""/resume, /rename and session completion in the composer."""
 
 import asyncio
 from collections.abc import Sequence
@@ -8,17 +8,27 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from prompt_toolkit.application.current import create_app_session, set_app
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion, WordCompleter
+from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import fragment_list_to_text
+from prompt_toolkit.input import DummyInput
+from prompt_toolkit.key_binding import KeyPress
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.output import DummyOutput
 from rich.text import Text
 
+from session_typing_helpers import present, string_value, text_value
+from vin.provider.events import TokenUsage
 from vin.sessions import storage
 from vin.sessions.records import new_session, snapshot_session
 from vin.sessions.transcript import encode_transcript
 from vin.tui import app, conversations
 from vin.tui.app import VinApp
-from vin.provider.events import TokenUsage
-from vin.types import ActiveTurn, Credentials, History, SessionRecord, Subagent, TranscriptEntry
-from session_typing_helpers import present, string_value, text_value
+from vin.tui.completion import SessionCompleter
+from vin.tui.layout import build_workspace
+from vin.types import ActiveTurn, Credentials, History, Pathish, SessionRecord, Subagent, TranscriptEntry
 
 
 class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -323,3 +333,224 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(present(self.owner.session_record)["id"], first["id"])
         self.assertEqual(self.owner.messages, first["messages"])
+
+
+class SessionCompletionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.project = self.root / "project"
+        self.project.mkdir()
+        self.enterContext(patch.object(storage, "SESSIONS_DIR", self.root / "sessions"))
+        self.commands = WordCompleter(["/help", "/model", "/resume"], sentence=True)
+
+    def completer(self) -> SessionCompleter:
+        return SessionCompleter(self.project, self.commands)
+
+    def suggestions(self, completer: Completer, text: str) -> list[Completion]:
+        return list(completer.get_completions(Document(text), CompleteEvent(text_inserted=True)))
+
+    def apply(self, text: str, completion: Completion) -> str:
+        buffer = Buffer(document=Document(text))
+        buffer.apply_completion(completion)
+        return buffer.text
+
+    def save(self, project: Pathish | None = None, *, updated: str = "2026-10-25T10:00:00+00:00") -> SessionRecord:
+        project = self.project if project is None else project
+        record = new_session(project, "Fix cancellation behavior")
+        record.update(created_at="2026-10-24T10:00:00+00:00", updated_at=updated)
+        storage.save_session(project, record)
+        return record
+
+    def test_title_queries_show_distinct_current_project_sessions_and_insert_full_ids(self) -> None:
+        older = self.save()
+        newer = self.save(updated="2026-10-25T12:00:00+00:00")
+        other_project = self.root / "another-project"
+        other_project.mkdir()
+        self.save(other_project)
+        completer = self.completer()
+
+        for text, prefix in (("/resume ", "/resume "),
+                             ("/resume CANCEL", "/resume "),
+                             ("/resume Fix cancellation", "/resume "),
+                             ("/resume\tCANCEL", "/resume\t")):
+            with self.subTest(text=text):
+                offered = self.suggestions(completer, text)
+                self.assertEqual([item.text for item in offered], [newer["id"], older["id"]])
+                for item, record in zip(offered, (newer, older)):
+                    self.assertEqual(fragment_list_to_text(item.display), "Fix cancellation behavior")
+                    meta = fragment_list_to_text(item.display_meta)
+                    self.assertIn(record["updated_at"], meta)
+                    self.assertIn(record["id"][:8], meta)
+                    self.assertEqual(self.apply(text, item), prefix + record["id"])
+
+    def test_id_query_and_newly_saved_sessions_are_available_without_recreating_completer(self) -> None:
+        first = self.save()
+        completer = self.completer()
+        offered = self.suggestions(completer, f"/resume {first['id'][:8]}")
+        self.assertEqual([item.text for item in offered], [first["id"]])
+        self.assertEqual(self.suggestions(completer, "/resume No matching session"), [])
+
+        second = self.save(updated="2026-10-25T12:00:00+00:00")
+        offered = self.suggestions(completer, "/resume ")
+        self.assertEqual([item.text for item in offered], [second["id"], first["id"]])
+
+
+    def workspace(self) -> VinApp:
+        owner = VinApp()
+        owner.project_dir = self.project
+        with create_app_session(input=DummyInput(), output=DummyOutput()):
+            build_workspace(owner)
+        return owner
+
+    def test_workspace_composer_offers_current_project_session_ids_without_loading_them(self) -> None:
+        record = self.save()
+        path = storage.session_path(self.project, record["id"])
+        saved_bytes = path.read_bytes()
+        owner = self.workspace()
+        document = owner.session.default_buffer.document
+
+        assert owner.session.completer is not None
+        offered = self.suggestions(owner.session.completer, "/resume cancellation")
+
+        self.assertEqual([item.text for item in offered], [record["id"]])
+        self.assertEqual(fragment_list_to_text(offered[0].display), record["name"])
+        self.assertEqual(owner.session.default_buffer.document, document)
+        self.assertEqual(owner.messages, [])
+        self.assertIsNone(owner.session_record)
+        self.assertIsNone(owner.pending_reply)
+        self.assertEqual(path.read_bytes(), saved_bytes)
+
+
+class SessionCompletionKeyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.project = Path(temporary.name) / "project"
+        self.project.mkdir()
+        self.enterContext(patch.object(storage, "SESSIONS_DIR", Path(temporary.name) / "sessions"))
+        self.records: list[SessionRecord] = []
+        for updated in ("2026-10-25T12:00:00+00:00", "2026-10-25T10:00:00+00:00"):
+            record = new_session(self.project, "Review cancellation behavior")
+            record.update(created_at="2026-10-24T10:00:00+00:00", updated_at=updated)
+            storage.save_session(self.project, record)
+            self.records.append(record)
+        self.enterContext(create_app_session(input=DummyInput(), output=DummyOutput()))
+        self.owner = VinApp()
+        self.owner.project_dir = self.project
+        build_workspace(self.owner)
+        self.enterContext(set_app(self.owner.app))
+        self.buffer = self.owner.session.default_buffer
+        self.buffer.accept_handler = self.owner.accept_input
+
+    async def asyncTearDown(self) -> None:
+        await self.owner.app.cancel_and_wait_for_background_tasks()
+
+    async def offer(self, text: str, count: int) -> None:
+        self.buffer.document = Document(text)
+        self.buffer.start_completion(select_first=False)
+        async with asyncio.timeout(2):
+            while self.buffer.complete_state is None or len(self.buffer.complete_state.completions) != count:
+                await asyncio.sleep(0)
+
+    def press(self, key: Keys) -> None:
+        self.owner.app.key_processor.feed(KeyPress(key))
+        self.owner.app.key_processor.process_keys()
+
+    async def test_tab_inserts_first_uuid_and_enter_alone_submits_the_command(self) -> None:
+        await self.offer("/resume cancellation", 2)
+        assert self.buffer.complete_state is not None
+        self.assertIsNone(self.buffer.complete_state.current_completion)
+
+        self.press(Keys.ControlI)
+
+        command = f"/resume {self.records[0]['id']}"
+        self.assertEqual(self.buffer.text, command)
+        self.assertIsNone(self.buffer.complete_state)
+        self.assertTrue(self.owner.submitted.empty())
+        self.assertFalse(self.owner.queued_prompts)
+        self.assertIsNone(self.owner.session_record)
+        self.assertIsNone(self.owner.pending_reply)
+        self.assertEqual(self.owner.messages, [])
+        self.assertEqual(self.buffer.cursor_position, len(command))
+
+        refreshed = asyncio.Event()
+        def signal_refreshed(sender: Buffer) -> None:
+            refreshed.set()
+
+        self.buffer.on_completions_changed += signal_refreshed
+        self.buffer.start_completion(select_first=False)
+        await asyncio.wait_for(refreshed.wait(), timeout=2)
+        self.assertIsNone(self.buffer.complete_state, "An exact UUID must not reopen the menu.")
+
+        self.press(Keys.ControlM)
+
+        self.assertEqual(self.owner.submitted.get_nowait(), command)
+        self.assertTrue(self.owner.submitted.empty())
+        self.assertFalse(self.owner.queued_prompts)
+
+    async def test_tab_accepts_highlighted_uuid_and_closes_the_menu(self) -> None:
+        await self.offer("/resume cancellation", 2)
+        self.press(Keys.Down)
+        self.press(Keys.Down)
+        assert self.buffer.complete_state is not None
+        assert self.buffer.complete_state.current_completion is not None
+        self.assertEqual(self.buffer.complete_state.current_completion.text, self.records[1]["id"])
+
+        self.press(Keys.ControlI)
+
+        self.assertEqual(self.buffer.text, f"/resume {self.records[1]['id']}")
+        self.assertIsNone(self.buffer.complete_state)
+        self.assertTrue(self.owner.submitted.empty())
+        self.assertIsNone(self.owner.session_record)
+
+    async def test_regular_command_tab_completion_still_works(self) -> None:
+        await self.offer("/mo", 1)
+
+        self.press(Keys.ControlI)
+
+        self.assertEqual(self.buffer.text, "/model")
+        self.assertTrue(self.owner.submitted.empty())
+
+    async def test_busy_compact_is_rejected_with_a_notice_and_leaves_the_queue(self) -> None:
+        async def hold() -> None:
+            await asyncio.Event().wait()
+
+        for state in ("replying", "queued"):
+            with self.subTest(state=state):
+                self.owner.transcript.clear()
+                self.owner.queued_prompts.clear()
+                self.owner.queued_prompts.append("Next request")
+                task = asyncio.create_task(hold()) if state == "replying" else None
+                self.owner.pending_reply = task
+                self.buffer.document = Document("/compact")
+                try:
+                    self.press(Keys.ControlM)
+                    self.press(Keys.ControlM)
+                finally:
+                    self.owner.pending_reply = None
+                    if task is not None:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+
+                self.assertTrue(self.owner.submitted.empty())
+                self.assertEqual(list(self.owner.queued_prompts), ["Next request"])
+                self.assertEqual(self.buffer.text, "/compact")
+                self.assertEqual(
+                    [row["content"] for row in self.owner.transcript],
+                    ["Finish or cancel the current work before compacting."],
+                )
+
+    async def test_idle_compact_is_submitted_without_a_notice(self) -> None:
+        self.buffer.document = Document("/compact")
+
+        self.press(Keys.ControlM)
+
+        self.assertEqual(self.owner.submitted.get_nowait(), "/compact")
+        self.assertEqual(self.owner.transcript, [])
+        self.assertEqual(self.buffer.text, "")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,7 +1,9 @@
-"""Project identity for independently stored conversation sessions."""
+"""Saved conversations: storage, records, recovery, rename and transcript encoding."""
 
 from contextlib import AbstractContextManager
 from copy import deepcopy
+from datetime import datetime, timezone
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -10,12 +12,24 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import cast
 import unittest
 from unittest.mock import patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+from prompt_toolkit.buffer import Buffer
+from rich.console import Console, RenderableType
+from rich.markdown import Markdown
+from rich.text import Text
+
+from session_typing_helpers import decoded_json, list_value, mapping_value, present, record_value, text_value, validated_transcript
 from vin.sessions import storage
-from vin.types import Pathish, SessionRecord
+from vin.sessions.records import new_session, snapshot_session, validate_session
+from vin.sessions.recovery import restore_session
+from vin.sessions.transcript import decode_content, decode_transcript, encode_transcript
+from vin.tui import conversations
+from vin.tui.app import VinApp
+from vin.types import ActiveTurn, DecodedEntry, History, JSONValue, Pathish, SessionRecord, Subagent, ToolEntry, TranscriptEntry
 
 
 def probe_file_lock(path: Pathish) -> str:
@@ -380,3 +394,577 @@ storage.save_session(sys.argv[2], updated, expected_record=baseline)
         with self.assertRaises(RuntimeError):
             self.storage.save_session(self.project, self.record, expected_record=self.record)
         self.assertEqual(path.read_text(encoding="utf-8"), "{broken")
+
+
+class NewSessionRecordTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.project = Path(temporary.name) / "project"
+        self.project.mkdir()
+
+    def create(self, first_message: object) -> SessionRecord:
+        return new_session(self.project, first_message)
+
+    def test_new_record_has_project_metadata_and_empty_conversation_data(self) -> None:
+        before = datetime.now(timezone.utc)
+        record = self.create("Review the queue")
+        after = datetime.now(timezone.utc)
+
+        self.assertEqual(record["version"], 1)
+        self.assertEqual(record["project_dir"], str(self.project.resolve()))
+        self.assertEqual(record["name"], "Review the queue")
+        identity = UUID(record["id"])
+        self.assertEqual(identity.version, 4)
+        self.assertEqual(str(identity), record["id"])
+        created = datetime.fromisoformat(record["created_at"])
+        offset = created.utcoffset()
+        self.assertIsNotNone(offset)
+        assert offset is not None
+        self.assertEqual(offset.total_seconds(), 0)
+        self.assertLessEqual(before, created)
+        self.assertLessEqual(created, after)
+        self.assertEqual(record["updated_at"], record["created_at"])
+        self.assertEqual(record["messages"], [])
+        self.assertEqual(record["transcript"], [])
+        self.assertIsNone(record["active_turn"])
+        self.assertEqual(json.loads(json.dumps(record)), record)
+
+
+    def test_auto_name_collapses_whitespace_and_limits_long_prompts(self) -> None:
+        record = self.create("  Review\n\t the   queue  ")
+        self.assertEqual(record["name"], "Review the queue")
+        long_prompt = "Check " + "界" * 100
+        record = self.create(long_prompt)
+        self.assertEqual(record["name"], long_prompt[:80])
+
+
+class SessionRecordValidationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from vin.sessions.records import new_session
+
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.project = Path(temporary.name)
+        self.record = new_session(self.project, "Review the queue")
+
+    def validate(self, record: object, project_dir: Pathish | None = None) -> None:
+        return validate_session(record, self.project if project_dir is None else project_dir)
+
+    def test_invalid_record_shape_or_unsupported_version_is_rejected(self) -> None:
+        cases: list[object] = [None, [], "record", {}, dict(self.record, version=0),
+                 dict(self.record, version=2), dict(self.record, version=True),
+                 dict(self.record, version="1"), dict(self.record, version=1.0)]
+        for record in cases:
+            with self.subTest(record=record):
+                with self.assertRaises(ValueError):
+                    self.validate(record)
+
+
+    def test_record_project_must_match_the_resolved_launch_directory(self) -> None:
+        child = self.project / "child"
+        child.mkdir()
+        self.assertIsNone(self.validate(self.record, child / ".."))
+
+        cases = [dict(self.record, project_dir=value) for value in (
+            None, 42, str(self.project / "other"),
+            self.record["project_dir"] + "/.", Path(self.record["project_dir"]),
+        )]
+        missing_project = dict(self.record)
+        missing_project.pop("project_dir")
+        cases.append(missing_project)
+        for record in cases:
+            with self.subTest(project_dir=record.get("project_dir")):
+                with self.assertRaises(ValueError):
+                    self.validate(record)
+
+
+    def test_nested_runtime_objects_and_cycles_are_rejected_as_value_errors(self) -> None:
+        from rich.text import Text
+
+        values: list[object] = [self.project, Text("Not encoded"), {"a", "b"}, b"bytes",
+                  object(), 1 + 2j, datetime.now(timezone.utc)]
+        cycle: dict[str, object] = {}
+        cycle["self"] = cycle
+        values.append(cycle)
+        for value in values:
+            with self.subTest(value_type=type(value).__name__):
+                record = dict(self.record, messages=[{"metadata": {"nested": [value]}}])
+                with self.assertRaises(ValueError):
+                    self.validate(record)
+
+
+class SessionSnapshotTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from vin.sessions.records import new_session
+
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.project = Path(temporary.name)
+        self.record = new_session(self.project, "Review the queue")
+
+    def snapshot(self, messages: History, transcript: list[TranscriptEntry], active_turn: ActiveTurn | None) -> SessionRecord:
+        return snapshot_session(self.record, messages, transcript, active_turn=active_turn)
+
+    def test_snapshot_updates_conversation_and_timestamp_preserving_identity(self) -> None:
+        from rich.text import Text
+        from vin.sessions.records import validate_session
+        from vin.sessions.transcript import decode_transcript
+
+        messages: History = [{"type": "reasoning", "encrypted_content": "fake-reasoning"}]
+        transcript: list[TranscriptEntry] = [
+            {"role": "user", "content": "Review the queue"},
+            {"role": "tool", "name": "read", "status": "running",
+             "content": Text("Reading 界", style="dim")},
+            {"role": "assistant", "content": "Checking", "streaming": True},
+        ]
+        active_turn: ActiveTurn = {"prompt": "Review the queue", "tools_used": True}
+        original = deepcopy(self.record)
+        before = datetime.now(timezone.utc)
+
+        snapshot = self.snapshot(messages, transcript, active_turn)
+
+        after = datetime.now(timezone.utc)
+        self.assertEqual(self.record, original)
+        for field in ("version", "id", "project_dir", "name", "created_at"):
+            self.assertEqual(snapshot[field], original[field])
+        updated = datetime.fromisoformat(snapshot["updated_at"])
+        offset = updated.utcoffset()
+        assert offset is not None
+        self.assertEqual(offset.total_seconds(), 0)
+        self.assertLessEqual(before, updated)
+        self.assertLessEqual(updated, after)
+        self.assertEqual(snapshot["messages"], messages)
+        self.assertEqual(snapshot["active_turn"], active_turn)
+        self.assertEqual(decode_transcript(snapshot["transcript"]), transcript)
+        self.assertIsNone(validate_session(snapshot, self.project))
+        self.assertEqual(json.loads(json.dumps(snapshot, allow_nan=False)), snapshot)
+
+    def test_snapshot_is_independent_and_omits_display_only_entries(self) -> None:
+        from rich.text import Text
+
+        messages: History = [{"metadata": {"nested": ["original"]}}]
+        text = Text("Interrupted", style="yellow")
+        transcript: list[TranscriptEntry] = [
+            {"role": "notice", "content": Markdown("display only"), "persist": False},
+            {"role": "notice", "content": "Thinking", "transient": True},
+            {"role": "notice", "content": text},
+        ]
+        active: ActiveTurn = {"prompt": "Review the queue", "tools_used": False}
+        snapshot = self.snapshot(messages, transcript, active)
+        expected = deepcopy(snapshot)
+
+        metadata = record_value(messages[0]["metadata"])
+        nested = list_value(metadata["nested"])
+        nested.append("later")
+        text.append(" later")
+        active["prompt"] = "Later prompt"
+        self.record["name"] = "Later name"
+        self.assertEqual(snapshot, expected)
+        self.assertEqual(len(snapshot["transcript"]), 1)
+        content = record_value(snapshot["transcript"][0]["content"])
+        self.assertEqual(content["text"], "Interrupted")
+        snapshot_metadata = record_value(snapshot["messages"][0]["metadata"])
+        snapshot_nested = list_value(snapshot_metadata["nested"])
+        snapshot_nested.append("snapshot only")
+        self.assertEqual(nested, ["original", "later"])
+
+
+class SavedSubagentRecordTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.project = Path(temporary.name)
+        self.record = new_session(self.project, "Delegate it")
+
+    def subagent(self) -> Subagent:
+        from rich.text import Text
+
+        return {"id": "call_task", "description": "Find sessions", "status": "finished", "started_at": 12.0,
+                "duration": 4.5, "tokens": 100, "transcript": [
+                    {"role": "user", "content": "Find where sessions are saved."},
+                    {"role": "tool", "name": "read", "label": "read storage.py", "status": "finished",
+                     "content": Text("● read storage.py · finished", style="dim")},
+                ]}
+
+    def test_snapshot_saves_subagents_without_their_clock_and_drops_the_key_when_empty(self) -> None:
+        saved = snapshot_session(self.record, [], [], active_turn=None, subagents=[self.subagent()])
+
+        item, = saved.get("subagents", [])
+        self.assertEqual({key: value for key, value in item.items() if key != "transcript"},
+                         {"id": "call_task", "description": "Find sessions", "status": "finished",
+                          "duration": 4.5, "tokens": 100})
+        self.assertEqual(item["transcript"][1]["content"], {"type": "rich_text", "text": "● read storage.py · finished",
+                                                           "style": "dim", "spans": []})
+        json.dumps(saved, allow_nan=False)
+
+        emptied = snapshot_session(saved, [], [], active_turn=None)
+        self.assertNotIn("subagents", emptied)
+        self.assertNotIn("subagents", snapshot_session(self.record, [], [], active_turn=None))
+
+    def test_sessions_without_subagents_stay_valid(self) -> None:
+        validate_session(self.record, self.project)
+
+    def test_invalid_saved_subagents_are_rejected(self) -> None:
+        saved = snapshot_session(self.record, [], [], active_turn=None, subagents=[self.subagent()])
+        good = record_value(cast(object, json.loads(json.dumps(saved.get("subagents", [])[0]))))
+        cases: dict[str, object] = {
+            "not a list": {"id": "x"},
+            "not a record": ["x"],
+            "missing id": [{key: value for key, value in good.items() if key != "id"}],
+            "description not text": [dict(good, description=1)],
+            "unknown status": [dict(good, status="paused")],
+            "tokens are a bool": [dict(good, tokens=True)],
+            "duration is text": [dict(good, duration="4s")],
+            "broken transcript": [dict(good, transcript=[{"role": "robot", "content": "x"}])],
+        }
+        for label, subagents in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(ValueError):
+                    validate_session(dict(deepcopy(self.record), subagents=subagents), self.project)
+        validate_session(dict(deepcopy(self.record), subagents=[dict(good, duration=None), dict(good, duration=3)]),
+                         self.project)
+
+
+class MetadataToolEntry(ToolEntry):
+    extra_metadata: dict[str, JSONValue]
+
+
+class SessionRestoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.project = Path(temporary.name)
+        self.messages: History = [
+            {"role": "user", "content": "Review the file"},
+            {"type": "reasoning", "encrypted_content": "fake-reasoning"},
+            {"type": "function_call", "name": "edit", "call_id": "call_saved", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_saved", "output": "Edited"},
+            {"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "Finished", "annotations": []},
+            ]},
+        ]
+        metadata_tool: MetadataToolEntry = {"role": "tool", "name": "edit", "label": "edit example.py",
+             "status": "finished", "content": Text("Edited", style="dim"),
+             "diff": "-old\n+new\n", "expanded": False,
+             "extra_metadata": {"nested": ["original"]}}
+        self.transcript: list[TranscriptEntry] = [
+            {"role": "user", "content": "Review the file"},
+            metadata_tool,
+            {"role": "assistant", "content": "Finished", "streaming": False},
+            {"role": "notice", "content": Text("Worked for 1s", style="dim")},
+        ]
+        snapshot = snapshot_session(new_session(self.project, "Review the file"),
+                                    self.messages, self.transcript, active_turn=None)
+        decoded = decoded_json(json.dumps(snapshot))
+        validate_session(decoded, self.project)
+        self.record = cast(SessionRecord, decoded)
+
+    def restore(self, record: SessionRecord, project: Pathish | None = None) -> tuple[History, list[TranscriptEntry]]:
+        return restore_session(record, self.project if project is None else project)
+
+    def test_finished_session_restores_context_and_display_as_independent_data(self) -> None:
+        original = deepcopy(self.record)
+
+        messages, transcript = self.restore(self.record)
+
+        self.assertEqual(messages, self.messages)
+        self.assertEqual(encode_transcript(transcript), self.record["transcript"])
+        self.assertIsInstance(transcript[1]["content"], Text)
+        self.assertEqual(text_value(transcript[1]["content"]).style, "dim")
+        self.assertEqual(self.record, original)
+        record_value(list_value(messages[-1]["content"])[0])["text"] = "Changed in memory"
+        text_value(transcript[1]["content"]).append(" changed")
+        metadata = mapping_value(transcript[1]).get("extra_metadata")
+        list_value(record_value(metadata)["nested"]).append("changed")
+        self.assertEqual(self.record, original)
+
+
+    def test_active_turn_normalizes_only_its_unfinished_display_entries(self) -> None:
+        history: list[TranscriptEntry] = self.transcript + [
+            {"role": "assistant", "content": "Earlier interrupted text", "streaming": True},
+            {"role": "notice", "content": Text("Interrupted after 1s", style="yellow")},
+        ]
+        current: list[TranscriptEntry] = [
+            {"role": "user", "content": "Continue review"},
+            {"role": "assistant", "content": "Checking", "streaming": False, "intermediate": True},
+            {"role": "tool", "name": "read", "status": "finished",
+             "content": Text("Read earlier file", style="dim")},
+            {"role": "tool", "name": "edit", "detail": "example.py", "label": "edit example.py",
+             "status": "running", "content": Text("Editing", style="dim"),
+             "diff": "-old\n+new\n"},
+            {"role": "assistant", "content": "Partial current reply", "streaming": True},
+        ]
+        record = self.record.copy()
+        record["transcript"] = encode_transcript(history + current)
+        record["active_turn"] = {"prompt": "Continue review", "tools_used": True}
+        original = deepcopy(record)
+
+        messages, restored = self.restore(record)
+
+        self.assertEqual(encode_transcript(restored[:len(history)]), record["transcript"][:len(history)])
+        tail = restored[len(history):]
+        self.assertEqual(tail[0], current[0])
+        self.assertEqual(tail[1], current[1])
+        self.assertEqual(tail[2], current[2])
+        assert tail[3]["role"] == "tool"
+        self.assertEqual(tail[3]["status"], "interrupted")
+        self.assertEqual(tail[3].get("diff"), "-old\n+new\n")
+        self.assertEqual(text_value(tail[3]["content"]).plain, "● edit example.py · interrupted")
+        self.assertEqual(text_value(tail[3]["content"]).style, "yellow")
+        self.assertEqual(tail[4]["content"], "Partial current reply")
+        assert "streaming" in tail[4]
+        self.assertFalse(tail[4]["streaming"])
+        self.assertEqual(tail[5]["role"], "notice")
+        self.assertIn("interrupted", text_value(tail[5]["content"]).plain.lower())
+        self.assertEqual(messages[:len(self.messages)], self.messages)
+        self.assertEqual(record, original)
+
+
+    def interrupted_record(self, *, tools_used: bool) -> SessionRecord:
+        entries: list[TranscriptEntry] = self.transcript + [{"role": "user", "content": "Continue review"}]
+        if tools_used:
+            entries.append({"role": "tool", "name": "edit", "status": "running",
+                            "content": Text("Editing", style="dim"), "diff": "-old\n+new\n"})
+        entries.append({"role": "assistant", "content": "Unfinished assistant fragment",
+                        "streaming": True})
+        record = self.record.copy()
+        record["transcript"] = encode_transcript(entries)
+        record["active_turn"] = {"prompt": "Continue review", "tools_used": tools_used}
+        return record
+
+    def test_tool_interruption_retains_pending_request_and_existing_caution_only(self) -> None:
+        record = self.interrupted_record(tools_used=True)
+        original = deepcopy(record)
+
+        messages, transcript = self.restore(record)
+
+        self.assertEqual(messages[:-2], self.messages)
+        self.assertEqual(messages[-2], {"role": "user", "content": "Continue review"})
+        self.assertEqual(messages[-1], {
+            "role": "assistant",
+            "content": ("Turn interrupted after tool use. "
+                        "Changes may already exist; read relevant files before retrying."),
+        })
+        self.assertNotIn("Unfinished assistant fragment", json.dumps(messages))
+        self.assertEqual(transcript[-2]["content"], "Unfinished assistant fragment")
+        self.assertEqual(record, original)
+
+    def test_text_only_interruption_keeps_previous_model_context_without_partial_reply(self) -> None:
+        record = self.interrupted_record(tools_used=False)
+        original = deepcopy(record)
+
+        messages, transcript = self.restore(record)
+
+        self.assertEqual(messages, self.messages)
+        self.assertEqual(transcript[-2]["content"], "Unfinished assistant fragment")
+        assert "streaming" in transcript[-2]
+        self.assertFalse(transcript[-2]["streaming"])
+        self.assertIn("interrupted", text_value(transcript[-1]["content"]).plain.lower())
+        self.assertEqual(record, original)
+
+    def test_repeated_restore_and_later_idle_checkpoint_do_not_duplicate_interruption(self) -> None:
+        record = self.interrupted_record(tools_used=True)
+        original = deepcopy(record)
+        messages, transcript = self.restore(record)
+        repeated_messages, repeated_transcript = self.restore(record)
+        self.assertEqual(len(messages), len(self.messages) + 2)
+        self.assertEqual(repeated_messages, messages)
+        self.assertEqual(encode_transcript(repeated_transcript), encode_transcript(transcript))
+        self.assertEqual(record, original)
+
+        idle = snapshot_session(record, messages, transcript, active_turn=None)
+        restored_messages, restored_transcript = self.restore(idle)
+        self.assertEqual(restored_messages, messages)
+        self.assertEqual(encode_transcript(restored_transcript), encode_transcript(transcript))
+
+
+class SessionRenameTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.project = self.root / "project"
+        self.project.mkdir()
+        self.enterContext(patch.object(storage, "SESSIONS_DIR", self.root / "sessions"))
+        self.owner = VinApp()
+        self.owner.project_dir = self.project
+        self.buffer = Buffer()
+        self.buffer.text = "Unsent draft"
+
+    def rename(self, name: object) -> str | None:
+        return self.owner.rename_conversation(name)
+
+    def test_invalid_name_preserves_current_conversation_and_saved_bytes(self) -> None:
+        self.owner.messages = [{"role": "user", "content": "Original prompt"}]
+        self.owner.transcript = [{"role": "user", "content": "Original prompt"}]
+        record = snapshot_session(
+            new_session(self.project, "Original prompt"), self.owner.messages,
+            self.owner.transcript, active_turn=None,
+        )
+        path = storage.save_session(self.project, record)
+        self.owner.session_record = deepcopy(record)
+        self.owner.saved_session_record = deepcopy(record)
+        previous = deepcopy((self.owner.session_record, self.owner.saved_session_record,
+                             self.owner.messages, self.owner.transcript))
+        previous_bytes = path.read_bytes()
+
+        for name in (None, 42, "", " \t\n ", "x" * 81, "界" * 81):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    self.rename(name)
+                self.assertEqual((self.owner.session_record, self.owner.saved_session_record,
+                                  self.owner.messages, self.owner.transcript), previous)
+                self.assertEqual(self.buffer.text, "Unsent draft")
+                self.assertEqual(path.read_bytes(), previous_bytes)
+
+    def prepare_saved_conversation(self) -> SessionRecord:
+        self.owner.messages = [
+            {"role": "user", "content": "Original prompt"},
+            {"type": "reasoning", "encrypted_content": "fake-saved-reasoning"},
+            {"role": "assistant", "content": "Original answer"},
+        ]
+        self.owner.transcript = [
+            {"role": "user", "content": "Original prompt"},
+            {"role": "assistant", "content": "Original answer"},
+        ]
+        record = snapshot_session(
+            new_session(self.project, "Original prompt"), self.owner.messages,
+            self.owner.transcript, active_turn=None,
+        )
+        storage.save_session(self.project, record)
+        self.owner.session_record = deepcopy(record)
+        self.owner.saved_session_record = deepcopy(record)
+        self.owner.last_session_checkpoint = 10.0
+        return record
+
+    def test_rename_saves_normalized_name_immediately_without_changing_identity_or_history(self) -> None:
+        record = self.prepare_saved_conversation()
+        previous_messages = deepcopy(self.owner.messages)
+        previous_transcript = deepcopy(self.owner.transcript)
+
+        with patch.object(conversations, "monotonic", return_value=10.0):
+            outcome = self.rename("  Fix\t cancellation\n behavior  ")
+
+        self.assertEqual(outcome, "Renamed: Fix cancellation behavior")
+        saved = present(storage.load_session(self.project, record["id"]))
+        self.assertEqual(saved["name"], "Fix cancellation behavior")
+        self.assertEqual(saved["id"], record["id"])
+        self.assertEqual(saved["created_at"], record["created_at"])
+        self.assertEqual(saved["project_dir"], record["project_dir"])
+        self.assertEqual(saved["messages"], previous_messages)
+        self.assertEqual(saved["transcript"], record["transcript"])
+        self.assertEqual(self.owner.messages, previous_messages)
+        self.assertEqual(self.owner.transcript, previous_transcript)
+        self.assertEqual(self.buffer.text, "Unsent draft")
+        self.assertEqual(self.owner.session_record, saved)
+        self.assertEqual(self.owner.saved_session_record, saved)
+        self.assertIsNot(self.owner.session_record, self.owner.saved_session_record)
+        self.assertEqual([item["id"] for item in storage.list_sessions(self.project)], [record["id"]])
+        self.assertEqual(self.rename("界" * 80), f"Renamed: {'界' * 80}")
+        self.assertEqual(present(storage.load_session(self.project, record["id"]))["name"], "界" * 80)
+
+    def test_failed_rename_keeps_previous_name_and_saved_bytes_then_can_retry(self) -> None:
+        record = self.prepare_saved_conversation()
+        path = storage.session_path(self.project, record["id"])
+        previous_bytes = path.read_bytes()
+        previous_transcript = deepcopy(self.owner.transcript)
+
+        with patch.object(conversations, "monotonic", return_value=10.0):
+            with patch.object(conversations, "save_session", side_effect=RuntimeError("Disk unavailable")):
+                self.assertIsNone(self.rename("New title"))
+
+            self.assertEqual(self.owner.session_record, record)
+            self.assertEqual(self.owner.saved_session_record, record)
+            self.assertEqual(path.read_bytes(), previous_bytes)
+            self.assertEqual(self.owner.transcript[:-1], previous_transcript)
+            notice = self.owner.transcript[-1]
+            self.assertEqual(notice["role"], "notice")
+            self.assertIn("Disk unavailable", str(notice["content"]))
+            self.assertEqual(self.buffer.text, "Unsent draft")
+            self.assertEqual(self.rename("New title"), "Renamed: New title")
+
+        self.assertEqual(present(storage.load_session(self.project, record["id"]))["name"], "New title")
+        self.assertIsNone(self.owner.session_save_error)
+
+
+class SessionContentDecodingTests(unittest.TestCase):
+    def decode(self, content: object) -> str | Text:
+        return decode_content(content)
+
+    def test_json_round_trip_restores_rich_content_and_its_rendered_appearance(self) -> None:
+        from vin.sessions.transcript import encode_content
+
+        styled = Text("● edit file.py\n界", style="dim")
+        styled.stylize("bold cyan", 7, 14)
+        styled.stylize("red", 9, 13)
+
+        def render(content: RenderableType) -> str:
+            output = StringIO()
+            console = Console(file=output, width=60, force_terminal=True, color_system="truecolor")
+            console.print(content)
+            return output.getvalue()
+
+        for source in (styled, Text("")):
+            with self.subTest(text=source.plain):
+                encoded: object = decoded_json(json.dumps(encode_content(source)))
+                before = json.dumps(encoded, sort_keys=True)
+
+                restored = self.decode(encoded)
+
+                self.assertIsInstance(restored, Text)
+                assert isinstance(restored, Text)
+                self.assertEqual(restored.plain, source.plain)
+                self.assertEqual(restored.style, source.style)
+                self.assertEqual(restored.spans, source.spans)
+                self.assertEqual(render(restored), render(source))
+                self.assertEqual(json.dumps(encoded, sort_keys=True), before)
+
+
+class SessionTranscriptDecodingTests(unittest.TestCase):
+    def decode(self, entries: object) -> list[DecodedEntry]:
+        return decode_transcript(entries)
+
+    def test_whole_transcript_json_round_trip_restores_order_diffs_and_rendering(self) -> None:
+        from prompt_toolkit.formatted_text import to_formatted_text
+        from vin.sessions.transcript import encode_transcript
+        from vin.tui.transcript import render_transcript
+
+        source: list[TranscriptEntry] = [
+            {"role": "user", "content": "Review\n[red]literal[/red]"},
+            {"role": "assistant", "content": "Checking **the file**.", "intermediate": True},
+            {"role": "tool", "name": "read", "detail": "same.py", "status": "finished",
+             "content": Text("● read same.py · finished", style="dim"), "expanded": True},
+            {"role": "tool", "name": "edit", "detail": "same.py", "status": "finished",
+             "content": Text("● edit same.py · finished", style="dim"),
+             "diff": "--- f\n+++ f\n@@ -1 +1 @@\n-old\n+new\n"},
+            {"role": "assistant", "content": "**Done.**", "streaming": False},
+            {"role": "notice", "content": Text("Worked for 2s · done 09:30 PM", style="dim")},
+        ]
+        saved: object = decoded_json(json.dumps(encode_transcript(source)))
+        original_saved = deepcopy(saved)
+
+        restored = self.decode(saved)
+
+        self.assertIsNot(restored, saved)
+        self.assertEqual([entry["role"] for entry in restored],
+                         ["user", "assistant", "tool", "tool", "assistant", "notice"])
+        assert restored[3]["role"] == "tool"
+        assert source[3]["role"] == "tool"
+        self.assertEqual(restored[3].get("diff"), source[3].get("diff"))
+        for width in (24, 90):
+            with self.subTest(width=width):
+                self.assertEqual(to_formatted_text(render_transcript(validated_transcript(restored), width, 100)),
+                                 to_formatted_text(render_transcript(source, width, 100)))
+        self.assertEqual(saved, original_saved)
+        saved_items = list_value(saved)
+        for entry, saved_entry in zip(restored, saved_items):
+            self.assertIsNot(entry, saved_entry)
+        empty: list[object] = []
+        restored_empty = self.decode(empty)
+        self.assertEqual(restored_empty, [])
+        self.assertIsNot(restored_empty, empty)
+
+
+if __name__ == "__main__":
+    unittest.main()

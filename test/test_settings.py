@@ -1,4 +1,4 @@
-"""/settings saves the subagent switch and request limit; /tasks opens any subagent of the conversation."""
+"""Saved model choice and subagent settings, /settings and /tasks."""
 
 import asyncio
 from pathlib import Path
@@ -9,11 +9,78 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 from rich.text import Text
 
+from provider_typing_helpers import credentials as fixture_credentials
 from vin.provider import preferences
 from vin.tui import app as app_module
 from vin.tui.app import VinApp
 from vin.types import Subagent, SubagentSettings
-from provider_typing_helpers import credentials as fixture_credentials
+
+
+class ModelPreferenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.destination = Path(self.directory.name) / "preferences.json"
+
+        location = patch.object(preferences, "PREFERENCES_PATH", self.destination)
+
+        location.start()
+        self.addCleanup(location.stop)
+
+
+    def test_saved_preference_can_be_loaded(self) -> None:
+        preferences.save_model_preference("chatgpt", "test-model")
+
+        self.assertEqual(
+            preferences.load_model_preference(),
+            {"provider": "chatgpt", "model": "test-model"},
+        )
+
+    def test_openrouter_preference_can_be_saved_and_loaded(self) -> None:
+        preferences.save_model_preference("openrouter", "acme/coder")
+
+        self.assertEqual(
+            preferences.load_model_preference(),
+            {"provider": "openrouter", "model": "acme/coder"},
+        )
+
+    def test_invalid_saved_data_is_rejected(self) -> None:
+        bodies = [
+            "not JSON",
+            "[]",
+            "{}",
+            '{"provider":"unsupported", "model": "test-model"}',
+            '{"provider":"chatgpt", "model": ""}',
+            '{"provider":"chatgpt", "model": " "}',
+            '{"provider":"chatgpt", "model": 123}',
+        ]
+
+        for body in bodies:
+            with self.subTest(body=body):
+                self.destination.write_text(body, encoding="utf-8")
+
+                with self.assertRaises(RuntimeError):
+                    preferences.load_model_preference()
+
+
+    def test_failed_save_preserves_previous_preference(self) -> None:
+        preferences.save_model_preference("chatgpt", "old-model")
+        original = self.destination.read_bytes()
+
+        with patch(
+            "vin.auth.credentials.os.replace",
+            side_effect=OSError("Simulated write faillure"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "Could not save model preference"
+            ):
+                preferences.save_model_preference("chatgpt", "new-model")
+
+        self.assertEqual(self.destination.read_bytes(), original)
+        self.assertEqual(
+            list(self.destination.parent.iterdir()),
+            [self.destination],
+        )
 
 
 def subagent(task_id: str, description: str, status: Literal["finished", "failed"] = "finished") -> Subagent:
