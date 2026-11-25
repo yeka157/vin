@@ -1,0 +1,4 @@
+{
+  "recommendations": ["detachhead.basedpyright"],
+  "unwantedRecommendations": ["anysphere.cursorpyright", "ms-python.vscode-pylance"]
+}

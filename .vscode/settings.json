@@ -1,0 +1,4 @@
+{
+  "cursorpyright.disableLanguageServices": true,
+  "basedpyright.importStrategy": "fromEnvironment"
+}
