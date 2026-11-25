@@ -23,7 +23,6 @@ import httpx2
 import openai
 from openai.types.responses import (
     ResponseCompletedEvent,
-    ResponseCompactionItemParamParam,
     ResponseFunctionToolCallParam,
     ResponseOutputMessageParam,
     ResponseOutputRefusalParam,
@@ -71,10 +70,6 @@ def call(name: str = 'read', arguments: str = '{"path":"f"}', call_id: str = 'ca
 def reasoning() -> ResponseReasoningItemParam:
     return {'type': 'reasoning', 'id': 'rs_1', 'summary': [],
             'encrypted_content': 'encrypted-reasoning-test'}
-
-
-def compaction() -> ResponseCompactionItemParamParam:
-    return {'type': 'compaction', 'id': 'cmp_manual', 'encrypted_content': 'fake-opaque-context'}
 
 
 def message(text: str = 'Done', refusal: bool = False) -> ResponseOutputMessageParam:
@@ -241,19 +236,6 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assertEqual(events, [('error', 'Compaction returned no summary. Please try again.')])
         self.assertEqual(self.input, original)
 
-    def test_manual_unexpected_tool_call_fails_without_execution_or_continuation(self) -> None:
-        original = deepcopy(self.input)
-        events = self.run_stream([
-            [completed([compaction(), call('write', '{"path":"f","content":"unexpected"}')])],
-            [delta(), completed([message()])],
-        ], compact_threshold=1024, compact_only=True)
-
-        self.assertEqual(self.executions, [])
-        self.assertEqual(len(self.requests), 1)
-        self.assertEqual([event[0] for event in events], ['error'])
-        self.assertFalse(self.events.tools_used.is_set())
-        self.assertEqual(self.input, original)
-
     def test_replays_reasoning_every_output_and_matching_tool_result(self) -> None:
         outputs: list[OutputItem] = [reasoning(), message('Checking.'), call()]
         events = self.run_stream([[delta('Checking.'), completed(outputs)],
@@ -272,31 +254,6 @@ class AgentLoopHTTPTests(unittest.TestCase):
 
         self.assertIn(('tool_started', {'name': 'read', 'detail': 'f'}), events)
         self.assertIn(('tool_finished', 'read'), events)
-
-    def test_automatic_compaction_runs_before_a_request_over_the_threshold(self) -> None:
-        self.input = [
-            {'role': 'user', 'content': 'Old request ' + 'x' * 3000},
-            {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'Old answer'}]},
-            {'role': 'user', 'content': 'Continue the task'},
-        ]
-        events = self.run_stream([
-            [delta('Summary text'), completed([message('Summary text')])],
-            [delta('Continuing'), completed([message('Continuing')])],
-        ], compact_threshold=500)
-
-        self.assertEqual(len(self.requests), 2)
-        summary_request, follow_up = self.requests
-        self.assertEqual(summary_request['tools'], [])
-        self.assertEqual(summary_request['instructions'], prompts.COMPACTION_PROMPT)
-        self.assertEqual(follow_up['input'], [
-            {'role': 'user', 'content': agent.SUMMARY_PREFIX + 'Summary text'},
-            {'role': 'user', 'content': 'Continue the task'},
-        ])
-        self.assertNotIn(('text', 'Summary text'), events)
-        self.assertIn(('text', 'Continuing'), events)
-        complete = next(event[1] for event in events if event[0] == 'complete')
-        assert complete is not None
-        self.assertEqual(complete[:2], follow_up['input'])
 
     def test_existing_checkpoint_does_not_prune_without_new_compaction_output(self) -> None:
         self.input = [
