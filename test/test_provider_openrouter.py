@@ -92,6 +92,8 @@ class OpenRouterStreamTests(unittest.TestCase):
         self.constructed: list[dict[str, object]] = []
         self.executions: list[ToolCall] = []
         self.input: History = [{"role": "user", "content": "Inspect the workspace."}]
+        self.sleeps: list[float] = []
+        self.enterContext(patch("openai._base_client.time.sleep", side_effect=self.sleeps.append))
 
     def run_stream(self, responses: Sequence[Fixture], *, account: object = ..., model: object = "test/model",
                    compact_only: bool = False, subagents: bool = True,
@@ -157,7 +159,7 @@ class OpenRouterStreamTests(unittest.TestCase):
         self.run_stream([[chunk("Done", finish="stop")]])
         self.assertEqual(self.constructed, [{"api_key": KEY, "base_url": "https://openrouter.ai/api/v1",
                                              "default_headers": {"X-OpenRouter-Title": "Vin"},
-                                             "timeout": 60, "max_retries": 0}])
+                                             "timeout": 60, "max_retries": 2}])
         self.assertEqual(self.urls, ["https://openrouter.ai/api/v1/chat/completions"])
         self.assertEqual(self.headers[0]["authorization"], f"Bearer {KEY}")
         self.assertEqual(self.headers[0]["x-openrouter-title"], "Vin")
@@ -248,17 +250,35 @@ class OpenRouterStreamTests(unittest.TestCase):
 
     def test_http_errors_map_to_openrouter_messages(self) -> None:
         cases = [
-            (401, "error", "OpenRouter key was rejected. Use /login to enter a new one."),
-            (402, "error", "OpenRouter credits are used up. Add credits and try again."),
-            (403, "error", "OpenRouter blocked this request (HTTP 403). Check your key's limits or try another model."),
-            (429, "rate_limit", "OpenRouter rate limit reached (HTTP 429). Please wait and try again."),
-            (502, "error", "OpenRouter request failed (HTTP 502)."),
+            (401, 1, "error", "OpenRouter key was rejected. Use /login to enter a new one."),
+            (402, 1, "error", "OpenRouter credits are used up. Add credits and try again."),
+            (403, 1, "error", "OpenRouter blocked this request (HTTP 403). Check your key's limits or try another model."),
+            (429, 3, "rate_limit", "OpenRouter rate limit reached (HTTP 429). Please wait and try again."),
+            (502, 3, "error", "OpenRouter request failed (HTTP 502)."),
         ]
-        for status, kind, message in cases:
+        for status, attempts, kind, message in cases:
             with self.subTest(status=status):
                 self.setUp()
-                events = self.run_stream([(status, {"error": {"code": status, "message": f"bad {KEY}"}})])
+                failure: Fixture = (status, {"error": {"code": status, "message": f"bad {KEY}"}})
+                events = self.run_stream([failure] * attempts)
                 self.assertEqual(events, [(kind, message)])
+                self.assertEqual(len(self.bodies), attempts)
+                self.assertEqual(len(self.sleeps), attempts - 1)
+
+    def test_a_transient_failure_is_retried_and_the_turn_completes(self) -> None:
+        failures: list[Fixture] = [
+            (503, {"error": {"code": 503, "message": "busy"}}),
+            httpx2.ConnectError("reset", request=httpx2.Request("POST", "https://openrouter.ai")),
+        ]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                self.setUp()
+                events = self.run_stream([failure, [chunk("Done", finish="stop")]])
+                self.assertEqual(events[-1][0], "complete")
+                self.assertIn(("text", "Done"), events)
+                self.assertEqual(len(self.bodies), 2)
+                self.assertEqual(self.bodies[0], self.bodies[1])
+                self.assertEqual(len(self.sleeps), 1)
 
     def test_network_failures_map_to_openrouter_messages(self) -> None:
         request = httpx2.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
@@ -269,7 +289,8 @@ class OpenRouterStreamTests(unittest.TestCase):
         for error, message in cases:
             with self.subTest(error=type(error).__name__):
                 self.setUp()
-                self.assertEqual(self.run_stream([error]), [("error", message)])
+                self.assertEqual(self.run_stream([error] * 3), [("error", message)])
+                self.assertEqual(len(self.sleeps), 2)
 
     def test_unexpected_failure_uses_the_generic_message(self) -> None:
         with patch("vin.provider.openrouter._request_completion", side_effect=ValueError(KEY)):

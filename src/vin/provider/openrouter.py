@@ -249,7 +249,7 @@ def stream_openrouter_response(
         base_url="https://openrouter.ai/api/v1",
         default_headers={"X-OpenRouter-Title": "Vin"},
         timeout=60,
-        max_retries=0,
+        max_retries=2,
     )
 
     def request(

@@ -255,7 +255,7 @@ class StreamingResponseTests(unittest.TestCase):
         self.assertEqual(self.messages, original)
         constructor.assert_called_once_with(
             api_key="fake-access-token", base_url="https://api.openai.com/v1",
-            timeout=60, max_retries=0,
+            timeout=60, max_retries=2,
         )
         from vin.tools import response_tools
         self.client.responses.create.assert_called_once()

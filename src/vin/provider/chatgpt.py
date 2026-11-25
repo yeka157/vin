@@ -308,7 +308,7 @@ def stream_chatgpt_response(
         api_key=access_token,
         base_url="https://api.openai.com/v1",
         timeout=60,
-        max_retries=0,
+        max_retries=2,
     )
     wire = _wire_client(client)
 
