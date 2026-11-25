@@ -1004,7 +1004,7 @@ class VinApp:
                 self.app.invalidate()
                 registration = await asyncio.shield(task)
             self.credentials = registration
-        except (RuntimeError, OSError, ValueError):
+        except RuntimeError, OSError, ValueError:
             if credentials is not None and not credentials.get("access_token"):
                 self.credentials = credentials
             raise
@@ -1234,7 +1234,7 @@ class VinApp:
     def run_conversation(self) -> None:
         try:
             asyncio.run(self.chat_loop())
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt, EOFError:
             pass
 
     def handle_command(self, text: str) -> Markdown | Text | None:
