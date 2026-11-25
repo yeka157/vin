@@ -20,6 +20,8 @@ from prompt_toolkit.output import DummyOutput
 from prompt_toolkit import PromptSession, Application
 from prompt_toolkit.key_binding import KeyPress
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.key_binding import KeyPressEvent
+from vin.tui.bindings import create_bindings
 
 from functools import partial
 from collections.abc import Callable, Coroutine, Sequence
@@ -1028,7 +1030,7 @@ class ModelCommandTests(unittest.TestCase):
                             assert isinstance(key, Keys)
                             binding = next(
                                 item for item in reversed(bindings.get_bindings_for_keys((key,)))
-                                if item.handler.__name__ != "return_to_main"
+                                if item.handler.__name__ in ("cancel_or_exit", "submit")
                             )
                             self.assertTrue(binding.filter())
                             if key == Keys.Escape:
@@ -1123,8 +1125,9 @@ class ModelCommandTests(unittest.TestCase):
         def cancel_from_ui() -> None:
             buffer = self.session.default_buffer
             buffer.document = Document("keep this draft", cursor_position=4)
-            self.vin_app.app.key_processor.feed(KeyPress(Keys.ControlC))
-            self.vin_app.app.key_processor.process_keys()
+            for _press in range(3):  # clear the draft, arm the exit hint, exit
+                self.vin_app.app.key_processor.feed(KeyPress(Keys.ControlC))
+                self.vin_app.app.key_processor.process_keys()
 
         def sign_in(registration: Credentials | None, *, cancel_event: Event, notify: Callable[[str], None]) -> Credentials:
             self.assertNotEqual(get_ident(), ui_thread)
@@ -1146,7 +1149,8 @@ class ModelCommandTests(unittest.TestCase):
         self.assertEqual(self.vin_app.models, [])
         self.assertFalse(self.vin_app.loading_model)
         buffer = self.session.default_buffer
-        self.assertEqual((buffer.text, buffer.cursor_position), ("keep this draft", 4))
+        self.assertEqual(buffer.text, "")
+        self.assertEqual(buffer.history.get_strings()[-1], "keep this draft")
         self.assertEqual(len(self.vin_app.transcript), 1)
         self.assertEqual(self.vin_app.messages, [])
         mock_prompt(self.session).assert_not_awaited()
@@ -1504,3 +1508,89 @@ class NoModelInputTests(unittest.TestCase):
         self.assertEqual(self.buffer.text, "")
         self.assertEqual(list(self.vin_app.queued_prompts), ["explain this repo"])
         self.assertEqual(self.vin_app.transcript, [])
+
+
+class InterruptAndExitKeyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.vin_app = vin.VinApp()
+        self.vin_app.app = Mock()
+        self.buffer = Buffer()
+        self.vin_app.session = cast(PromptSession[str], Mock(default_buffer=self.buffer))
+        bindings = create_bindings(self.vin_app)
+        self.bindings = {binding.handler.__name__: binding for binding in bindings.bindings}
+        self.exit = Mock()
+        self.now = 100.0
+        def clock() -> float:
+            return self.now
+
+        self.enterContext(patch("vin.tui.bindings.monotonic", side_effect=clock))
+        self.enterContext(patch.object(vin, "monotonic", side_effect=clock))
+
+    def press(self, name: str) -> None:
+        event = cast(KeyPressEvent, Mock(current_buffer=self.buffer, app=Mock(exit=self.exit)))
+        _ = self.bindings[name].handler(event)
+
+    def test_ctrl_c_clears_a_draft_into_history_without_arming_exit(self) -> None:
+        self.buffer.text = "half typed"
+        self.press("cancel_or_exit")
+        self.assertEqual(self.buffer.text, "")
+        self.assertEqual(self.buffer.history.get_strings()[-1], "half typed")
+        self.exit.assert_not_called()
+        self.assertNotIn("Press again", self.vin_app.model_indicator_text())
+
+    def test_two_presses_within_two_seconds_exit(self) -> None:
+        for name in ("cancel_or_exit", "exit_on_empty"):
+            with self.subTest(key=name):
+                self.exit.reset_mock()
+                self.vin_app.exit_armed_until = 0.0
+                self.press(name)
+                self.exit.assert_not_called()
+                self.assertEqual(self.vin_app.model_indicator_text(), " Press again to exit")
+                self.now += 1.9
+                self.press(name)
+                self.exit.assert_called_once()
+                self.assertIsInstance(cast(object, self.exit.call_args.kwargs["exception"]), KeyboardInterrupt)
+
+    def test_a_second_press_after_two_seconds_only_shows_the_hint_again(self) -> None:
+        self.press("cancel_or_exit")
+        self.now += 2.1
+        self.assertNotIn("Press again", self.vin_app.model_indicator_text())
+        self.press("cancel_or_exit")
+        self.exit.assert_not_called()
+        self.assertEqual(self.vin_app.model_indicator_text(), " Press again to exit")
+
+    def test_ctrl_d_exits_only_from_an_empty_prompt_without_a_popup(self) -> None:
+        active = self.bindings["exit_on_empty"].filter
+        self.assertTrue(active())
+        self.buffer.text = "x"
+        self.assertFalse(active())
+        self.buffer.text = ""
+        loop = asyncio.new_event_loop()
+        self.addCleanup(loop.close)
+        self.vin_app.choice_future = loop.create_future()
+        self.assertFalse(active())
+
+    def test_escape_stops_a_running_reply_without_arming_exit(self) -> None:
+        cancel = Mock()
+        task = Mock(cancel=cancel)
+        active = self.bindings["interrupt_reply"].filter
+        self.assertFalse(active())
+        self.vin_app.pending_reply = task
+        self.vin_app.request_started_at = self.now - 3
+        self.assertTrue(active())
+        self.assertFalse(self.bindings["interrupt_reply"].eager(), "Esc Enter must still insert a newline")
+        self.press("interrupt_reply")
+        cancel.assert_called_once()
+        self.assertIsNone(self.vin_app.pending_reply)
+        self.assertEqual(str(self.vin_app.transcript[-1]["content"]), "Interrupted after 3s")
+        self.exit.assert_not_called()
+        self.assertEqual(self.vin_app.exit_armed_until, 0.0)
+
+    def test_escape_keeps_its_job_in_panels_and_subagent_views(self) -> None:
+        self.vin_app.pending_reply = Mock()
+        active = self.bindings["interrupt_reply"].filter
+        self.vin_app.panel_index = 0
+        self.assertFalse(active())
+        self.vin_app.panel_index = None
+        self.vin_app.viewed = "call_task"
+        self.assertFalse(active())

@@ -107,6 +107,43 @@ def create_bindings(app: "VinApp") -> KeyBindings:
             elif not is_command(text) or idle:
                 event.current_buffer.validate_and_handle()
 
+    def stop_reply(event: KeyPressEvent) -> None:
+        task = app.pending_reply
+        if task is None:
+            return
+        if app.tool_status is not None and app.tool_status[1] == "running":
+            app.tool_status = (app.tool_status[0], "failed")
+        app.last_request_duration = (
+            monotonic() - app.request_started_at
+            if app.request_started_at is not None
+            else 0.0
+        )
+        app.request_started_at = None
+        app.pending_reply = None
+        app.reply_entry = None
+        task.cancel()
+        app.transcript.append(
+            {
+                "role": "notice",
+                "content": Text(
+                    f"Interrupted after {format_duration(app.last_request_duration)}",
+                    style="yellow",
+                ),
+            }
+        )
+        event.app.invalidate()
+
+    def exit_when_pressed_twice(event: KeyPressEvent) -> None:
+        buffer = event.current_buffer
+        if buffer.text:
+            buffer.reset(append_to_history=True)
+            return
+        if monotonic() < app.exit_armed_until:
+            event.app.exit(exception=KeyboardInterrupt())
+        else:
+            app.exit_armed_until = monotonic() + 2
+            event.app.invalidate()
+
     @bindings.add(
         "escape",
         filter=Condition(
@@ -136,30 +173,33 @@ def create_bindings(app: "VinApp") -> KeyBindings:
                 app.pending_auth.cancel()
             event.app.invalidate()
         elif app.pending_reply is not None:
-            if app.tool_status is not None and app.tool_status[1] == "running":
-                app.tool_status = (app.tool_status[0], "failed")
-            task = app.pending_reply
-            app.last_request_duration = (
-                monotonic() - app.request_started_at
-                if app.request_started_at is not None
-                else 0.0
-            )
-            app.request_started_at = None
-            app.pending_reply = None
-            app.reply_entry = None
-            task.cancel()
-            app.transcript.append(
-                {
-                    "role": "notice",
-                    "content": Text(
-                        f"Interrupted after {format_duration(app.last_request_duration)}",
-                        style="yellow",
-                    ),
-                }
-            )
-            event.app.invalidate()
+            stop_reply(event)
         else:
-            event.app.exit(exception=KeyboardInterrupt())
+            exit_when_pressed_twice(event)
+
+    @bindings.add(
+        "escape",
+        filter=Condition(
+            lambda: app.choice_future is None
+            and app.secret_future is None
+            and app.pending_reply is not None
+            and app.panel_index is None
+            and app.viewed is None
+        ),
+    )
+    def interrupt_reply(event: KeyPressEvent) -> None:
+        stop_reply(event)
+
+    @bindings.add(
+        "c-d",
+        filter=Condition(
+            lambda: app.choice_future is None
+            and app.secret_future is None
+            and not app.session.default_buffer.text
+        ),
+    )
+    def exit_on_empty(event: KeyPressEvent) -> None:
+        exit_when_pressed_twice(event)
 
     @bindings.add(
         "escape",

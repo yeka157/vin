@@ -273,6 +273,7 @@ class VinApp:
         self.openrouter: OpenRouterAccount | None = None
         self.secret_future: asyncio.Future[str] | None = None
         self.picker: ModelPicker | None = None
+        self.exit_armed_until = 0.0
 
     async def ask_secret(self, message: str) -> str:
         if self.choice_future is not None or self.secret_future is not None:
@@ -1403,6 +1404,8 @@ class VinApp:
         await self.load_initial_model()
 
     def model_indicator_text(self) -> str:
+        if monotonic() < self.exit_armed_until:
+            return " Press again to exit"
         subagent = self.viewed_subagent()
         if subagent is not None:
             return (
