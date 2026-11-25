@@ -518,3 +518,64 @@ class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RenderCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        transcript._RENDERED.clear()  # pyright: ignore[reportPrivateUsage]
+        self.addCleanup(transcript._RENDERED.clear)  # pyright: ignore[reportPrivateUsage]
+        self.entries: list[TranscriptEntry] = [
+            {"role": "assistant", "content": f"**answer {n}**"} for n in range(5)]
+
+    def count_draws(self, *frames: tuple[list[TranscriptEntry], int]) -> int:
+        with patch.object(transcript, "print_assistant_message",
+                          wraps=transcript.print_assistant_message) as draw:
+            for entries, width in frames:
+                transcript.transcript_lines(entries, width, 24)
+        return draw.call_count
+
+    def test_finished_entries_are_drawn_once_across_frames(self) -> None:
+        self.assertEqual(self.count_draws((self.entries, 80), (self.entries, 80)), 5)
+
+    def test_streaming_entry_is_drawn_every_frame(self) -> None:
+        self.entries.append({"role": "assistant", "content": "partial", "streaming": True})
+        self.assertEqual(self.count_draws((self.entries, 80), (self.entries, 80)), 5 + 2)
+
+    def test_width_or_content_changes_redraw(self) -> None:
+        self.assertEqual(self.count_draws((self.entries, 80), (self.entries, 100)), 10)
+        self.entries[0]["content"] = "changed"
+        self.assertEqual(self.count_draws((self.entries, 100)), 1)
+
+    def test_cached_lines_match_a_fresh_render(self) -> None:
+        first = transcript.render_transcript(self.entries, 80, 24)
+        cached = transcript.render_transcript(self.entries, 80, 24)
+        transcript._RENDERED.clear()  # pyright: ignore[reportPrivateUsage]
+        self.assertEqual(cached, first)
+        self.assertEqual(transcript.render_transcript(self.entries, 80, 24), first)
+
+    def test_an_equal_but_different_entry_never_reuses_another_entrys_lines(self) -> None:
+        original: TranscriptEntry = {"role": "assistant", "content": "same text"}
+        twin: TranscriptEntry = {"role": "assistant", "content": "same text"}
+        transcript.transcript_lines([original], 80, 24)
+        cache = transcript._RENDERED  # pyright: ignore[reportPrivateUsage]
+        owner, key, _lines = cache[id(original)]
+        cache[id(twin)] = (owner, key, [[("", "STALE")]])
+        rendered = transcript.transcript_lines([twin], 80, 24)
+        self.assertNotIn("STALE", str(rendered))
+
+    def test_entries_that_are_gone_leave_the_cache(self) -> None:
+        transcript.transcript_lines(self.entries, 80, 24)
+        transcript.transcript_lines(self.entries[:2], 80, 24)
+        self.assertEqual(set(transcript._RENDERED), {id(entry) for entry in self.entries[:2]})  # pyright: ignore[reportPrivateUsage]
+
+    def test_a_collapsed_tool_group_is_one_header_line_and_one_blank_line(self) -> None:
+        tool: ToolEntry = {"role": "tool", "name": "read", "status": "finished", "detail": "a.py",
+                           "content": Text("● read a.py · finished")}
+        entries: list[TranscriptEntry] = [tool, {"role": "assistant", "content": "Done."}]
+        headers: list[tuple[int, int, ToolEntry]] = []
+        lines = transcript.transcript_lines(entries, 80, 24, group_headers=headers)
+        text = ["".join(fragment[1] for fragment in line) for line in lines]
+        self.assertEqual(headers, [(0, 1, tool)])
+        self.assertEqual(text[0].strip(), "▸ 1 tool call · 1 finished")
+        self.assertEqual(text[1], "")
+        self.assertIn("Done.", text[2])

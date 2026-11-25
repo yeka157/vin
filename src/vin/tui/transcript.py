@@ -1,13 +1,18 @@
 """Transcript message rendering, viewport scrolling, and mouse handling."""
 
 from io import StringIO
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from types import NotImplementedType
 from typing import Literal, TypedDict
 
 from prompt_toolkit.data_structures import Point
-from prompt_toolkit.formatted_text import ANSI
-from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
+from prompt_toolkit.formatted_text import (
+    ANSI,
+    StyleAndTextTuples,
+    split_lines,
+    to_formatted_text,
+)
+from prompt_toolkit.layout.controls import UIContent, UIControl
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from rich.console import Console
 from rich.markdown import Markdown, Heading
@@ -107,37 +112,113 @@ def print_activity_entry(console: Console, entry: ToolEntry | NoticeEntry) -> No
     console.print()
 
 
-def render_transcript(
+_RENDERED: dict[int, tuple[object, tuple[object, ...], list[StyleAndTextTuples]]] = {}
+
+
+def _draw(width: int, height: int, draw: Callable[[Console], None]) -> str:
+    buffer = StringIO()
+    draw(
+        Console(
+            file=buffer,
+            width=width,
+            height=height,
+            force_terminal=True,
+            color_system="truecolor",
+            no_color=False,
+        )
+    )
+    return buffer.getvalue()
+
+
+def _lines(text: str) -> list[StyleAndTextTuples]:
+    lines: list[StyleAndTextTuples] = []
+    for line in split_lines(to_formatted_text(ANSI(text))):
+        merged: StyleAndTextTuples = []
+        for fragment in line:
+            style, piece = fragment[0], fragment[1]
+            if merged and merged[-1][0] == style:
+                merged[-1] = (style, merged[-1][1] + piece)
+            else:
+                merged.append((style, piece))
+        lines.append(merged)
+    if text.endswith("\n"):
+        lines.pop()
+    return lines
+
+
+def _draw_entry(
+    entry: Mapping[str, object],
+    width: int,
+    height: int,
+    draw: Callable[[Console], None],
+    seen: set[int],
+) -> list[StyleAndTextTuples]:
+    key = (
+        width,
+        *sorted(
+            (
+                name,
+                (
+                    value
+                    if isinstance(value, str | int | float | bool | None)
+                    else id(value)
+                ),
+            )
+            for name, value in entry.items()
+        ),
+    )
+    seen.add(id(entry))
+    cached = _RENDERED.get(id(entry))
+    if cached is not None and cached[0] is entry and cached[1] == key:
+        return cached[2]
+    lines = _lines(_draw(width, height, draw))
+    _RENDERED[id(entry)] = (entry, key, lines)
+    return lines
+
+
+def transcript_lines(
     entries: Sequence[TranscriptEntry],
     width: int,
     height: int,
     *,
     group_headers: list[GroupHeader] | None = None,
-) -> ANSI:
+) -> list[StyleAndTextTuples]:
     if group_headers is not None:
         group_headers.clear()
-    output = StringIO()
-    transcript_console = Console(
-        file=output,
-        width=width,
-        height=height,
-        force_terminal=True,
-        color_system="truecolor",
-        no_color=False,
-    )
+    parts: list[StyleAndTextTuples] = []
+    seen: set[int] = set()
+
+    def add(lines: list[StyleAndTextTuples]) -> None:
+        parts.extend(lines)
 
     grouped_entries = group_tool_entries(entries)
     for index, entry in enumerate(grouped_entries):
-        start_line = 0
         if entry["role"] == "user":
-            print_user_message(transcript_console, entry["content"])
-        elif entry["role"] == "assistant":
-            print_assistant_message(
-                transcript_console,
-                entry["content"],
-                streaming=entry.get("streaming", False),
-                intermediate=entry.get("intermediate", False),
+            content = entry["content"]
+            add(
+                _draw_entry(
+                    entry,
+                    width,
+                    height,
+                    lambda console: print_user_message(console, content),
+                    seen,
+                )
             )
+        elif entry["role"] == "assistant":
+            assistant = entry
+
+            def draw_assistant(console: Console) -> None:
+                print_assistant_message(
+                    console,
+                    assistant["content"],
+                    streaming=assistant.get("streaming", False),
+                    intermediate=assistant.get("intermediate", False),
+                )
+
+            if assistant.get("streaming", False):
+                add(_lines(_draw(width, height, draw_assistant)))
+            else:
+                add(_draw_entry(assistant, width, height, draw_assistant, seen))
         elif entry["role"] == "tool_group":
             first_tool = entry["entries"][0]
             active = is_tool_group_active(grouped_entries, index)
@@ -146,25 +227,63 @@ def render_transcript(
             if not active:
                 summary = format_tool_group_summary(entry["entries"])
                 arrow = "▾" if expanded else "▸"
-
+                start_line = len(parts)
+                add(
+                    _lines(
+                        _draw(
+                            width,
+                            height,
+                            lambda console: console.print(
+                                Text(f"{arrow} {summary}", style="dim")
+                            ),
+                        )
+                    )
+                )
                 if group_headers is not None:
-                    start_line = output.getvalue().count("\n")
-
-                transcript_console.print(Text(f"{arrow} {summary}", style="dim"))
-
-                if group_headers is not None:
-                    end_line = output.getvalue().count("\n")
-                    group_headers.append((start_line, end_line, first_tool))
+                    group_headers.append((start_line, len(parts), first_tool))
 
             if expanded:
                 for tool_entry in entry["entries"]:
-                    print_activity_entry(transcript_console, tool_entry)
+                    add(
+                        _draw_entry(
+                            tool_entry,
+                            width,
+                            height,
+                            lambda console, tool=tool_entry: print_activity_entry(
+                                console, tool
+                            ),
+                            seen,
+                        )
+                    )
             else:
-                transcript_console.print()
+                add([[]])
         else:
-            print_activity_entry(transcript_console, entry)
+            activity = entry
+            add(
+                _draw_entry(
+                    activity,
+                    width,
+                    height,
+                    lambda console: print_activity_entry(console, activity),
+                    seen,
+                )
+            )
 
-    return ANSI(output.getvalue())
+    for stale in _RENDERED.keys() - seen:
+        del _RENDERED[stale]
+    return parts
+
+
+def render_transcript(
+    entries: Sequence[TranscriptEntry],
+    width: int,
+    height: int,
+) -> StyleAndTextTuples:
+    fragments: StyleAndTextTuples = []
+    for line in transcript_lines(entries, width, height):
+        fragments.extend(line)
+        fragments.append(("", "\n"))
+    return fragments
 
 
 class TranscriptControl(UIControl):
@@ -208,16 +327,13 @@ class TranscriptControl(UIControl):
         return None
 
     def create_content(self, width: int, height: int | None) -> UIContent:
-        text = render_transcript(
+        lines = transcript_lines(
             self.get_entries(),
             max(1, width),
             max(1, height or 1),
             group_headers=self.group_headers,
-        )
-
-        control = FormattedTextControl(text, show_cursor=False)
-        content = control.create_content(width, height)
-        self.line_count = content.line_count
+        ) + [[]]
+        self.line_count = len(lines)
         self.viewport_height = max(1, height or 1)
         self.scroll(0)
         start = self.top_line
@@ -228,7 +344,7 @@ class TranscriptControl(UIControl):
         visible_count = min(self.viewport_height, self.line_count - start)
 
         return UIContent(
-            get_line=lambda line_number: content.get_line(start + line_number),
+            get_line=lambda line_number: lines[start + line_number],
             line_count=visible_count,
             cursor_position=Point(x=0, y=max(0, visible_count - 1)),
             show_cursor=False,
