@@ -899,6 +899,11 @@ class VinApp:
         whitelist = [
             model for model in self.models if model["provider"] == "openrouter"
         ]
+        fresh = {model["slug"]: model for model in catalog}
+        refreshed = [fresh.get(model["slug"], model) for model in whitelist]
+        if refreshed != whitelist:
+            self.save_whitelist(refreshed)
+            whitelist = refreshed
         added = {model["slug"] for model in whitelist}
         matches = [model for model in catalog if model["slug"] not in added]
         if not matches:

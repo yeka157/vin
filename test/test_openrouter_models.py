@@ -254,6 +254,29 @@ class ModelCommandMethodTests(unittest.IsolatedAsyncioTestCase):
         self.save_choice.assert_not_called()
         self.assert_selection(None, None)
 
+    async def test_add_refreshes_saved_models_from_the_catalog_even_when_cancelled(self) -> None:
+        priced: ModelMetadata = {**CODER, "input_price": 1.0, "output_price": 2.0, "features": ["image"]}
+        gone: ModelMetadata = {"slug": "old/gone", "display_name": "Gone", "provider": "openrouter"}
+        self.vin.models = [GPT, CODER, gone]
+        self.catalog.return_value = [priced, OPUS]
+        self.pick.return_value = None
+        self.assertIsNone(await self.vin.add_openrouter_model(""))
+        self.save_list.assert_called_once_with([priced, gone])
+        self.assertEqual(self.vin.models, [GPT, priced, gone])
+        self.assertEqual(self.pick.await_args_list[0].args[1], [OPUS])
+
+    async def test_add_keeps_the_refreshed_entries_when_adding(self) -> None:
+        priced: ModelMetadata = {**CODER, "input_price": 1.0, "output_price": 2.0}
+        self.catalog.return_value = [priced, OPUS]
+        self.pick.return_value = [OPUS]
+        await self.vin.add_openrouter_model("")
+        self.assertEqual(self.save_list.call_args_list[-1].args[0], [priced, OPUS])
+
+    async def test_an_up_to_date_list_is_not_saved_again(self) -> None:
+        self.pick.return_value = None
+        await self.vin.add_openrouter_model("")
+        self.save_list.assert_not_called()
+
     async def test_search_text_opens_the_picker_already_filtered(self) -> None:
         self.pick.return_value = [OPUS]
         await self.vin.add_openrouter_model("claude")
