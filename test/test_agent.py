@@ -30,7 +30,7 @@ class ProviderNeutralLoopTests(unittest.TestCase):
             sent.append((kind, value))
 
         with patch.object(agent, "execute_tool", return_value="1: hello") as execute:
-            history = agent.run_agent_turn(request, user, send, Event())
+            history = agent.run_agent_turn(request, list(user), send, Event())
 
         execute.assert_called_once()
         self.assertEqual(execute.call_args.args[:2], ("read", '{"path":"f"}'))
@@ -60,6 +60,42 @@ READ_CALL: History = [{"type": "function_call", "call_id": "call_read", "name": 
 
 STARTED: ToolStarted = {"name": "task", "detail": "Find sessions", "task_id": "call_task",
                         "prompt": "Find where sessions are saved."}
+
+
+class PartialWorkTests(unittest.TestCase):
+    def test_close_open_calls_answers_only_calls_without_a_result(self) -> None:
+        history: History = [
+            {"role": "user", "content": "Go"},
+            {"type": "function_call", "call_id": "a", "name": "read", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "a", "output": "ok"},
+            {"type": "function_call", "call_id": "b", "name": "edit", "arguments": "{}"},
+        ]
+        before = list(history)
+        closed = agent.close_open_calls(history)
+        self.assertEqual(closed, before + [
+            {"type": "function_call_output", "call_id": "b", "output": "Not run: the turn was interrupted."}])
+        self.assertEqual(history, before)
+        self.assertEqual(agent.close_open_calls(closed), closed)
+
+    def test_cancel_during_a_tool_keeps_its_result_in_the_callers_list(self) -> None:
+        cancel = Event()
+        calls: History = [{"type": "function_call", "call_id": c, "name": "read", "arguments": '{"path":"f"}',
+                           "status": "completed"} for c in ("first", "second")]
+
+        def request(_history: History, _sender: EventSender, _subagent: bool, _compact: bool) -> tuple[History, bool]:
+            return calls, False
+
+        def execute(*_args: object) -> str:
+            cancel.set()
+            return "1: hello"
+
+        inputs: History = [{"role": "user", "content": "Read f twice."}]
+        with patch.object(agent, "execute_tool", side_effect=execute) as ran:
+            self.assertIsNone(agent.run_agent_turn(request, inputs, agent.quiet, cancel))
+        ran.assert_called_once()
+        self.assertEqual(inputs[-1], {"type": "function_call_output", "call_id": "first", "output": "1: hello"})
+        self.assertIn({"type": "function_call_output", "call_id": "second",
+                       "output": "Not run: the turn was interrupted."}, agent.close_open_calls(inputs))
 
 
 class TaskToolTests(unittest.TestCase):
@@ -131,7 +167,7 @@ class TaskToolTests(unittest.TestCase):
         self.assertEqual(tagged, [("call_task", "text", "Found it")])
         self.assertEqual(self.sent, [("tool_started", STARTED), ("tool_finished", "task")])
 
-    def test_request_budget_defaults_to_eight_and_failure_lets_the_parent_continue(self) -> None:
+    def test_request_budget_defaults_to_eight_and_running_out_lets_the_parent_continue(self) -> None:
         for budget, expected in ((None, 8), (2, 2)):
             with self.subTest(budget=budget):
                 self.setUp()
@@ -140,9 +176,10 @@ class TaskToolTests(unittest.TestCase):
                                             lambda _history, _sender: (READ_CALL, False), budget)
 
                 self.assertEqual(len(self.child_seen), expected)
+                self.assertEqual(self.child_seen[-1][-1], {"role": "user", "content": agent.FINAL_REQUEST_NOTE})
                 self.assertEqual(self.task_output(),
-                                 f"Error: subagent failed: Model request limit exceeded: maximum {expected}.")
-                self.assertEqual(self.sent[-1], ("tool_failed", "task"))
+                                 "Subagent stopped: its tool budget ran out before it wrote an answer.")
+                self.assertEqual(self.sent[-1], ("tool_finished", "task"))
                 assert history is not None
                 self.assertEqual(history[-1], answer("Done")[0])
 

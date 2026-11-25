@@ -138,7 +138,7 @@ class AgentLoopHTTPTests(unittest.TestCase):
         with (patch('openai.OpenAI', side_effect=create_client),
               patch.object(Tools, 'execute', side_effect=tool_execute),
               redirect_stdout(output), redirect_stderr(output)):
-            stream_chatgpt_response(self.credentials, 'selected-model', self.input,
+            stream_chatgpt_response(self.credentials, 'selected-model', list(self.input),
                                    self.events, self.cancel, compact_threshold=compact_threshold,
                                    compact_only=compact_only)
         self.assertNotIn(TOKEN, output.getvalue())
@@ -407,19 +407,30 @@ class AgentLoopHTTPTests(unittest.TestCase):
         self.assertTrue(any(kind == 'complete' for kind, _ in events))
         self.assertEqual(self.executions, [])
 
-    def test_at_most_eight_tool_calls_per_response(self) -> None:
-        events = self.run_stream([[completed([call(call_id=f'call_{n}') for n in range(9)])],
+    def test_calls_past_eight_are_answered_as_skipped_and_the_turn_continues(self) -> None:
+        events = self.run_stream([[completed([call(call_id=f'call_{n}') for n in range(10)])],
                                   [delta(), completed([message()])]])
-        self.assertLessEqual(len(self.executions), 8)
-        if not self.executions:
-            self.assertRegex(str(events).lower(), r'eight|8|limit')
+        self.assertEqual(len(self.executions), 8)
+        outputs = {item['call_id']: item['output'] for item in self.requests[1]['input']
+                   if item.get('type') == 'function_call_output'}
+        self.assertEqual(len(outputs), 10)
+        self.assertEqual(outputs['call_8'], agent.SKIPPED_CALL)
+        self.assertEqual(outputs['call_9'], agent.SKIPPED_CALL)
+        self.assertEqual(events[-1][0], 'complete')
 
-    def test_turn_stops_after_at_most_sixteen_requests(self) -> None:
-        events = self.run_stream([[completed([call(call_id=f'call_{n}')])]
-                                  for n in range(17)])
-        self.assertGreater(len(self.requests), 1, 'Tool results must continue the model loop.')
-        self.assertLessEqual(len(self.requests), 16)
-        self.assertTrue(any(kind == 'error' for kind, _ in events))
+    def test_the_sixteenth_request_asks_for_a_summary_and_never_runs_tools(self) -> None:
+        events = self.run_stream([[completed([call(call_id=f'call_{n}')])] for n in range(16)])
+        self.assertEqual(len(self.requests), 16)
+        self.assertEqual(len(self.executions), 15)
+        last_input = self.requests[-1]['input']
+        self.assertEqual(last_input[-1], {'role': 'user', 'content': agent.FINAL_REQUEST_NOTE})
+        self.assertNotIn(agent.FINAL_REQUEST_NOTE, str(self.requests[-2]['input']))
+        kind, history = events[-1]
+        self.assertEqual(kind, 'complete')
+        assert isinstance(history, list)
+        self.assertEqual(history[-1], {'type': 'function_call_output', 'call_id': 'call_15',
+                                       'output': agent.BUDGET_USED})
+        self.assertNotIn('error', [kind for kind, _ in events])
 
     def test_cancel_after_first_tool_stops_remaining_calls_and_requests(self) -> None:
         def cancel_after_one(entries: list[ToolCall]) -> list[str]:
@@ -520,8 +531,13 @@ class AgentHistoryTests(unittest.IsolatedAsyncioTestCase):
                     kinds = {kind for item in self.owner.messages if isinstance(kind := item.get('type'), str)}
                     self.assertTrue({'reasoning', 'function_call', 'function_call_output'} <= kinds)
                 else:
-                    self.assertRegex(str(self.owner.messages).lower(), r'interrupt|cancel|incomplete|failed')
-                    self.assertRegex(str(self.owner.messages).lower(), r'check|inspect|read|change|write')
+                    messages = self.owner.messages
+                    self.assertEqual(messages[-1]["role"], "assistant")
+                    self.assertIn("Turn interrupted after tool use", str(messages[-1]["content"]))
+                    self.assertIn("function_call", [item.get("type") for item in messages])
+                    self.assertIn({"type": "function_call_output", "call_id": "call_1", "output": "Wrote file."},
+                                  messages)
+                    self.assertEqual(agent.close_open_calls(messages), messages, "Every call has a result")
                 self.assertNotIn(TOKEN, str(self.owner.messages))
             finally:
                 self.release.set()

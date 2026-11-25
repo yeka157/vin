@@ -32,7 +32,7 @@ from rich.console import RenderableType
 from rich.padding import Padding
 from rich.text import Text
 
-from vin.agent import is_summary
+from vin.agent import close_open_calls, is_summary
 from vin.auth.chatgpt import (
     TokenExchangeError,
     login_with_chatgpt,
@@ -735,19 +735,12 @@ class VinApp:
                 if subagent is not None:
                     finish_subagent(subagent, interrupted_state)
             if not completed and events.tools_used.is_set():
-                self.messages.extend(
-                    [
-                        {"role": "user", "content": text},
-                        {
-                            "role": "assistant",
-                            "content": (
-                                "Turn interrupted after tool use. "
-                                "Changes may already exist; read relevant "
-                                "files before retrying."
-                            ),
-                        },
-                    ]
-                )
+                self.messages[:] = close_open_calls(list(request)) + [
+                    {
+                        "role": "assistant",
+                        "content": "Turn interrupted after tool use. Changes may already exist; read relevant files before retrying.",
+                    }
+                ]
             if self.pending_reply is asyncio.current_task():
                 if (
                     not completed

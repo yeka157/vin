@@ -220,7 +220,7 @@ class StreamingResponseTests(unittest.TestCase):
             redirect_stdout(output), redirect_stderr(output),
         ):
             chatgpt.stream_chatgpt_response(
-                credentials, model, self.messages, self.events, self.cancel,
+                credentials, model, list(self.messages), self.events, self.cancel,
                 compact_only=compact_only, subagents=subagents, subagent_budget=subagent_budget,
             )
         self.assertEqual(output.getvalue(), "")

@@ -6,7 +6,9 @@ from typing import Callable, Literal, cast
 from vin.types import History, ProviderItem, is_record, is_list
 from vin.provider.events import EventSender
 
-type RequestFn = Callable[[History, EventSender, bool, bool], tuple[History, bool] | None]
+type RequestFn = Callable[
+    [History, EventSender, bool, bool], tuple[History, bool] | None
+]
 
 type SubagentSender = Callable[[str], EventSender]
 
@@ -99,6 +101,33 @@ def execute_tool(
 
 
 SUMMARY_PREFIX = "Summary of the conversation so far:\n\n"
+MAX_CALLS = 8
+SKIPPED_CALL = (
+    "Not run: at most 8 tool calls run per response. Call it again if still needed."
+)
+BUDGET_USED = "Not run: the tool budget for this turn is used up."
+FINAL_REQUEST_NOTE = "The tool budget for this turn is used up. Do not call tools. Summarize what you did, what you verified, and what remains."
+
+
+def close_open_calls(history: History) -> History:
+    answered = {
+        call_id
+        for item in history
+        if item.get("type") == "function_call_output"
+        and isinstance(call_id := item.get("call_id"), str)
+    }
+    closed: History = []
+    for item in history:
+        closed.append(item)
+        if item.get("type") == "function_call" and item.get("call_id") not in answered:
+            closed.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": item.get("call_id"),
+                    "output": "Not run: the turn was interrupted.",
+                }
+            )
+    return closed
 
 
 def quiet(_kind: str, _value: object) -> None:
@@ -111,10 +140,21 @@ def estimate_tokens(history: History) -> int:
 
 def is_summary(item: ProviderItem) -> bool:
     content = item.get("content")
-    return item.get("role") == "user" and isinstance(content, str) and content.startswith(SUMMARY_PREFIX)
+    return (
+        item.get("role") == "user"
+        and isinstance(content, str)
+        and content.startswith(SUMMARY_PREFIX)
+    )
 
 
-def compact_history(request: RequestFn, history: History, cancel_event: Event, *, subagent: bool, keep_last_user: bool) -> History | None:
+def compact_history(
+    request: RequestFn,
+    history: History,
+    cancel_event: Event,
+    *,
+    subagent: bool,
+    keep_last_user: bool,
+) -> History | None:
     if cancel_event.is_set():
         return None
     completed = request(history, quiet, subagent, True)
@@ -127,7 +167,9 @@ def compact_history(request: RequestFn, history: History, cancel_event: Event, *
     if not summary.strip():
         raise AgentError("Compaction returned no summary. Please try again.")
     compacted: History = [{"role": "user", "content": SUMMARY_PREFIX + summary}]
-    last_user = next((item for item in reversed(history) if item.get("role") == "user"), None)
+    last_user = next(
+        (item for item in reversed(history) if item.get("role") == "user"), None
+    )
     if keep_last_user and last_user is not None:
         compacted.append(last_user)
     return compacted
@@ -147,16 +189,19 @@ def run_agent_turn(
     subagent_sender: SubagentSender | None = None,
     subagents: bool = True,
 ) -> History | None:
-    history = list(inputs)
+    history = inputs
 
     if compact_only:
         return compact_history(
             request, history, cancel_event, subagent=subagent, keep_last_user=False
         )
 
-    for _ in range(max_requests):
+    for attempt in range(max_requests):
+        final = attempt == max_requests - 1
         if cancel_event.is_set():
             return None
+        if final:
+            history.append({"role": "user", "content": FINAL_REQUEST_NOTE})
         if (
             compact_threshold is not None
             and len(history) > 2
@@ -167,7 +212,7 @@ def run_agent_turn(
             )
             if compacted is None:
                 return None
-            history = compacted
+            history[:] = compacted
 
         completed = request(history, send, subagent, False)
 
@@ -177,9 +222,6 @@ def run_agent_turn(
         output, has_text = completed
 
         calls = [item for item in output if item.get("type") == "function_call"]
-
-        if len(calls) > 8:
-            raise AgentError("Tool call limit exceeded: maximum 8.")
 
         if any(call.get("status") != "completed" for call in calls):
             raise AgentError("Response contains an incomplete tool call.")
@@ -210,7 +252,18 @@ def run_agent_turn(
 
             return history
 
-        for call in calls:
+        if final:
+            history.extend(
+                {
+                    "type": "function_call_output",
+                    "call_id": call.get("call_id"),
+                    "output": BUDGET_USED,
+                }
+                for call in calls
+            )
+            return history
+
+        for index, call in enumerate(calls):
             if cancel_event.is_set():
                 return None
 
@@ -227,7 +280,9 @@ def run_agent_turn(
             ):
                 raise AgentError("The model returned invalid response output.")
 
-            if name == "task" and subagents and not subagent:
+            if index >= MAX_CALLS:
+                result = SKIPPED_CALL
+            elif name == "task" and subagents and not subagent:
                 result = run_task(
                     request,
                     call_id,
@@ -247,9 +302,6 @@ def run_agent_turn(
                 )
                 result = execute_tool(name, arguments, cancel_event, send)
 
-            if cancel_event.is_set():
-                return None
-
             history.append(
                 {
                     "type": "function_call_output",
@@ -257,6 +309,8 @@ def run_agent_turn(
                     "output": result,
                 }
             )
+            if cancel_event.is_set():
+                return None
     raise AgentError(f"Model request limit exceeded: maximum {max_requests}.")
 
 
@@ -371,4 +425,7 @@ def run_task(
     if history is None:
         return ""
     send("tool_finished", "task")
-    return truncate_output(final_answer(history))
+    return truncate_output(
+        final_answer(history)
+        or "Subagent stopped: its tool budget ran out before it wrote an answer."
+    )

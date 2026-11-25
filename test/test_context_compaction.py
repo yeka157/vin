@@ -50,11 +50,11 @@ class CompactionLoopTests(unittest.TestCase):
                 self.assertIs(sender, agent.quiet)
             return next(queue)
 
-        inputs = self.history if history is None else history
-        before = deepcopy(inputs)
+        inputs = deepcopy(self.history if history is None else history)
         result = agent.run_agent_turn(request, inputs, self.send, self.cancel,
                                       compact_threshold=threshold, compact_only=compact_only)
-        self.assertEqual(inputs, before)
+        if result is not None and not compact_only:
+            self.assertIs(result, inputs, "The caller's list holds the turn's work")
         return result
 
     def test_over_the_threshold_compacts_first_and_keeps_the_current_request(self) -> None:

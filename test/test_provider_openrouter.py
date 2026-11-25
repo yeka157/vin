@@ -133,7 +133,7 @@ class OpenRouterStreamTests(unittest.TestCase):
               patch.object(Tools, "execute", side_effect=tool_execute),
               redirect_stdout(output), redirect_stderr(output)):
             stream_openrouter_response({"key": KEY, "label": "test"} if account is ... else account, model,
-                                       self.input, self.events, self.cancel,
+                                       list(self.input), self.events, self.cancel,
                                        compact_only=compact_only, subagents=subagents)
         self.assertNotIn(KEY, output.getvalue())
         self.assertTrue(all(client.is_closed for client in self.clients), "Close every SDK/HTTP client.")
