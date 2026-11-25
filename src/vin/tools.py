@@ -70,12 +70,25 @@ def truncate_output(text: str) -> str:
     if len(text) <= MAX_OUTPUT_CHARS:
         return text
 
-    marker = "\n[output truncated at 20,000 characters]"
-    return text[: MAX_OUTPUT_CHARS - len(marker)] + marker
+    keep = MAX_OUTPUT_CHARS - 64
+    head = keep // 2
+    return (
+        text[:head]
+        + f"\n[... {len(text) - keep:,} characters omitted ...]\n"
+        + text[-(keep - head) :]
+    )
 
 
 def read(path: str, offset: int = 1, limit: int = 200) -> str:
-    """Read a UTF-8 workspace file with line numbers."""
+    """Read a UTF-8 text file from the workspace as numbered `N: line` rows.
+
+    Output ends with a `[lines A-B of N]` footer that says where to continue.
+
+    Args:
+        path: File path relative to the launch directory. Directories are not supported; use bash ls.
+        offset: First line to return, 1-based.
+        limit: Maximum number of lines to return, 1-2000.
+    """
     if offset < 1:
         raise ValueError("Offset must be at least 1.")
 
@@ -92,6 +105,14 @@ def read(path: str, offset: int = 1, limit: int = 200) -> str:
 
     lines = data.decode("utf-8-sig").splitlines()
 
+    total = len(lines)
+    if total == 0:
+        return "[empty file]"
+    if offset > total:
+        raise ValueError(
+            f"Offset {offset} is past the end of the file ({total} lines)."
+        )
+
     start = offset - 1
     selected = lines[start : start + limit]
 
@@ -99,7 +120,13 @@ def read(path: str, offset: int = 1, limit: int = 200) -> str:
         f"{number}: {line}" for number, line in enumerate(selected, start=offset)
     )
 
-    return truncate_output(output)
+    end = start + len(selected)
+    footer = (
+        f"[lines {offset}-{end} of {total}; continue with offset={end+1}]"
+        if end < total
+        else f"[lines {offset}-{end} of {total}]"
+    )
+    return truncate_output(f"{output}\n{footer}")
 
 
 def _atomic_write(
@@ -170,7 +197,12 @@ def _atomic_write(
 
 
 def write(path: str, content: str) -> str:
-    """Create or overwrite a UTF-8 workspace file."""
+    """Create a file or replace its entire contents. Prefer edit for changing an existing file.
+
+    Args:
+        path: File path relative to the launch directory. Missing parent directories are created.
+        content: Complete new file contents.
+    """
     data = content.encode("utf-8")
 
     with FILE_MUTATION_LOCK:
@@ -274,7 +306,16 @@ def _replace_match(
 
 
 def edit(path: str, old_text: str, new_text: str) -> str:
-    """Replace one unique text occurrence and return a unified diff."""
+    """Replace exactly one occurrence of old_text with new_text and return a unified diff.
+
+    Matching tolerates trailing whitespace, line endings and smart quotes or dashes.
+    Fails if old_text is missing or appears more than once.
+
+    Args:
+        path: File path relative to the launch directory.
+        old_text: Text copied from the file, with enough surrounding lines to be unique. Must not be blank.
+        new_text: Replacement text. Use an empty string to delete old_text.
+    """
     with FILE_MUTATION_LOCK:
         target = _resolve_path(path)
 
@@ -340,7 +381,15 @@ def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
 
 
 def bash(command: str, timeout: int = 30) -> str:
-    """Run noninteractive Bash in the launch directory."""
+    """Run a noninteractive Bash command in the launch directory and return the exit code and output.
+
+    Stdin is closed and stdout/stderr are merged. Each call starts a fresh shell, so cd
+    and exported variables do not persist. Long output keeps the beginning and the end.
+
+    Args:
+        command: Bash command. Pass flags that avoid prompts and pagers, such as -y or --no-pager.
+        timeout: Seconds before the command and its child processes are killed, 1-300. Raise it for builds and test suites.
+    """
     if not 1 <= timeout <= 300:
         raise ValueError("Timeout must be between 1 and 300 seconds.")
 
@@ -360,8 +409,10 @@ def bash(command: str, timeout: int = 30) -> str:
     )
 
     assert process.stdout is not None
-    output = bytearray()
-    capture_limit = MAX_OUTPUT_CHARS * 4
+    half = MAX_OUTPUT_CHARS * 2
+    head = bytearray()
+    tail = bytearray()
+    dropped = 0
     timed_out = False
     completed = False
 
@@ -385,10 +436,14 @@ def bash(command: str, timeout: int = 30) -> str:
                         selector.unregister(key.fileobj)
                         continue
 
-                    remaining = capture_limit - len(output)
-
-                    if remaining > 0:
-                        output.extend(chunk[:remaining])
+                    if len(head) < half:
+                        take = half - len(head)
+                        head.extend(chunk[:take])
+                        chunk = chunk[take:]
+                    tail.extend(chunk)
+                    if len(tail) > half:
+                        dropped += len(tail) - half
+                        del tail[: len(tail) - half]
         completed = not timed_out
     finally:
         if not completed:
@@ -398,7 +453,8 @@ def bash(command: str, timeout: int = 30) -> str:
 
         process.stdout.close()
 
-    text = output.decode("utf-8", errors="replace")
+    gap = f"\n[... {dropped:,} bytes omitted ...]\n".encode() if dropped else b""
+    text = (bytes(head) + gap + bytes(tail)).decode("utf-8", errors="replace")
     notice = f"Command timed out after {timeout} seconds.\n" if timed_out else ""
 
     return truncate_output(f"Exit code: {process.returncode}\n{notice}{text}")

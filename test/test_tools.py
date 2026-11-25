@@ -9,11 +9,12 @@ import sys
 import tempfile
 import time
 from threading import Event, Thread
-from typing import ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar, cast
 import unittest
 from unittest.mock import patch
 
 from vin import tools
+from vin.tools import MAX_OUTPUT_CHARS, response_tools, truncate_output
 from vin.types import Pathish
 
 _P = ParamSpec("_P")
@@ -58,7 +59,26 @@ class ToolTests(unittest.TestCase):
         for kwargs in [{'offset': 0}, {'offset': -1}, {'limit': 0}, {'limit': 2001}]:
             self.rejected(self.tools.read, 'f', **kwargs)
         (self.root/'f').write_text('x\n'*2001)
-        self.assertEqual(len(self.output(self.tools.read('f', limit=2000)).splitlines()), 2000)
+        self.assertEqual(len(self.output(self.tools.read('f', limit=2000)).splitlines()), 2001)
+
+    def test_read_ends_with_where_to_continue_and_names_edge_cases(self) -> None:
+        (self.root/'f').write_text(''.join(f'line {n}\n' for n in range(1, 301)))
+        self.assertTrue(self.output(self.tools.read('f')).endswith(
+            '200: line 200\n[lines 1-200 of 300; continue with offset=201]'))
+        self.assertTrue(self.output(self.tools.read('f', offset=201)).endswith(
+            '300: line 300\n[lines 201-300 of 300]'))
+        self.assertTrue(self.output(self.tools.read('f', offset=300, limit=5)).endswith('[lines 300-300 of 300]'))
+        self.rejected(self.tools.read, 'f', offset=301)
+        (self.root/'empty').write_text('')
+        self.assertEqual(self.output(self.tools.read('empty')), '[empty file]')
+
+    def test_every_tool_parameter_is_described(self) -> None:
+        for tool in response_tools(task=True):
+            parameters = cast(dict[str, dict[str, dict[str, object]]], tool['parameters'])
+            properties = parameters['properties']
+            for name, schema in properties.items():
+                with self.subTest(tool=tool['name'], parameter=name):
+                    self.assertTrue(schema['description'])
 
     def test_write_creates_parents_and_overwrites_utf8(self) -> None:
         self.tools.write('nested/f', 'café\n')
@@ -165,12 +185,29 @@ class ToolTests(unittest.TestCase):
         for result in [self.tools.read('f'), self.tools.bash(f'{python} -c \'print("x"*40000)\'')]:
             output = self.output(result)
             self.assertLessEqual(len(output), 20_000)
-            self.assertIn('truncat', output.lower())
+            self.assertIn('characters omitted', output)
+        self.assertTrue(self.output(self.tools.read('f')).endswith('[lines 1-1 of 1]'))
         (self.root/'f').write_text('old')
         diff = self.output(self.tools.edit('f', 'old', 'x'*30_000))
         self.assertLessEqual(len(diff), 20_000)
-        self.assertIn('truncat', diff.lower())
+        self.assertIn('characters omitted', diff)
         self.assertEqual((self.root/'f').read_text(), 'x'*30_000)
+
+    def test_truncation_keeps_the_start_and_the_end(self) -> None:
+        text = 'HEAD' + 'x' * 50_000 + 'TAIL'
+        out = truncate_output(text)
+        self.assertLessEqual(len(out), MAX_OUTPUT_CHARS)
+        self.assertTrue(out.startswith('HEAD'))
+        self.assertTrue(out.endswith('TAIL'))
+        self.assertIn('characters omitted', out)
+        self.assertEqual(truncate_output('short'), 'short')
+
+    def test_long_bash_output_keeps_its_last_line(self) -> None:
+        result = self.output(self.tools.bash('yes line | head -n 200000; echo FINAL_LINE; exit 3'))
+        self.assertLessEqual(len(result), MAX_OUTPUT_CHARS)
+        self.assertTrue(result.startswith('Exit code: 3\nline'))
+        self.assertTrue(result.rstrip().endswith('FINAL_LINE'))
+        self.assertIn('omitted', result)
 
     def test_bash_combines_stderr_and_stdout_exit_status_and_launch_cwd(self) -> None:
         result = self.tools.bash('printf out; printf err >&2; exit 7')
