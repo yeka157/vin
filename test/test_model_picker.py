@@ -14,11 +14,14 @@ from prompt_toolkit.data_structures import Size
 from prompt_toolkit.key_binding import KeyPressEvent
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import BufferControl
+from prompt_toolkit.layout.processors import AfterInput, ConditionalProcessor
+from prompt_toolkit.layout import Window, walk
+from prompt_toolkit.widgets.base import Border
 from prompt_toolkit.output import DummyOutput
 
 from vin.tui.app import VinApp
 from vin.tui.bindings import create_bindings
-from vin.tui.model_picker import ModelPicker, context_label, price_label
+from vin.tui.model_picker import ModelPicker, context_label, price_labels
 from vin.types import ModelMetadata
 
 OPUS: ModelMetadata = {"slug": "anthropic/claude-opus", "display_name": "Anthropic: Claude Opus",
@@ -55,10 +58,10 @@ class LabelTests(unittest.TestCase):
                 self.assertEqual(context_label(model), label)
 
     def test_price_is_per_million_in_and_out(self) -> None:
-        self.assertEqual(price_label(OPUS), "5.00 · 25.00")
-        self.assertEqual(price_label(FREE), "free")
-        self.assertEqual(price_label(SONNET), "")
-        self.assertEqual(price_label({**FREE, "input_price": 1.0}), "1.00 · 0.00")
+        self.assertEqual(price_labels(OPUS), ("5.00", "25.00"))
+        self.assertEqual(price_labels(FREE), ("free", "free"))
+        self.assertEqual(price_labels(SONNET), ("", ""))
+        self.assertEqual(price_labels({**FREE, "input_price": 1.0}), ("1.00", "0.00"))
 
 
 class PickerTests(unittest.TestCase):
@@ -157,22 +160,26 @@ class PickerTests(unittest.TestCase):
 
     def test_rows_show_name_context_price_and_input(self) -> None:
         picker = ModelPicker("Add", [OPUS, FREE], multi=True, action="add")
-        lines = text(picker).splitlines()
-        self.assertEqual(lines[0].split(), ["Model", "Context", "$/M", "in", "·", "out", "Input"])
-        self.assertEqual(lines[1].split(), ["○", "Anthropic:", "Claude", "Opus", "1M", "5.00", "·", "25.00",
+        heading, top_rule, opus, free, bottom_rule = text(picker).splitlines()
+        self.assertEqual(heading.split(), ["Model", "Context", "In", "$/M", "Out", "$/M", "Also", "accepts"])
+        self.assertEqual(set(top_rule.strip()), {"─"})
+        self.assertEqual(top_rule, bottom_rule)
+        self.assertEqual(opus.split(), ["○", "Anthropic:", "Claude", "Opus", "1M", "5.00", "25.00",
                                             "image", "reasoning"])
-        self.assertEqual(lines[2].split(), ["○", "Acme:", "Free", "free"])
-        self.assertEqual(lines[0].index("Context") + len("Context"), lines[1].index("1M") + len("1M"))
-        self.assertEqual(lines[0].index("out") + len("out"), lines[1].index("25.00") + len("25.00"))
-        self.assertEqual(lines[0].index("Input"), lines[1].index("image"))
-        self.assertEqual(picker.footer(), " 2 of 2 · Type to search · ↑↓ move · Space select · Enter add")
+        self.assertEqual(free.split(), ["○", "Acme:", "Free", "free", "free"])
+        self.assertEqual(heading.index("Model"), opus.index("Anthropic"))
+        self.assertEqual(heading.index("Context") + len("Context"), opus.index("1M") + len("1M"))
+        self.assertEqual(heading.index("In $/M") + len("In $/M"), opus.index("5.00") + len("5.00"))
+        self.assertEqual(heading.index("Out $/M") + len("Out $/M"), opus.index("25.00") + len("25.00"))
+        self.assertEqual(heading.index("Also accepts"), opus.index("image"))
+        self.assertEqual(picker.footer(), "   2 of 2 · ↑↓ move · Space select · Enter add")
 
     def test_highlighted_row_has_the_pointer_and_style(self) -> None:
         picker = ModelPicker("Add", [OPUS, FREE], multi=True, action="add")
         self.press(picker, "down")
         self.press(picker, " ")
         self.press(picker, "down")
-        rows = picker.render()[1:]
+        rows = picker.render()[2:-1]
         self.assertTrue(rows[0][1].startswith("  ◉ "))
         self.assertEqual(rows[0][0], "")
         self.assertTrue(rows[1][1].startswith("❯ ○ "))
@@ -181,42 +188,56 @@ class PickerTests(unittest.TestCase):
     def test_mixed_providers_show_the_provider_and_the_current_mark(self) -> None:
         picker = ModelPicker("Choose", [GPT, OPUS], multi=False, action="choose", current=("chatgpt", "gpt"))
         lines = text(picker).splitlines()
-        self.assertIn("✓ GPT · ChatGPT", lines[1])
-        self.assertIn("Anthropic: Claude Opus · OpenRouter", lines[2])
+        self.assertIn("✓ GPT · ChatGPT", lines[2])
+        self.assertIn("Anthropic: Claude Opus · OpenRouter", lines[3])
         self.assertNotIn("·", ModelPicker("Add", [OPUS], multi=True, action="add").header())
 
     def test_long_names_and_lines_are_cut_to_the_screen(self) -> None:
         long: ModelMetadata = {**OPUS, "display_name": "X" * 200}
         with screen(columns=80):
             picker = ModelPicker("Add", [long], multi=True, action="add")
-            line = text(picker).splitlines()[1]
+            line = text(picker).splitlines()[2]
             self.assertLessEqual(len(line), 79)
             self.assertIn("X…", line)
+
+    def test_search_box_has_a_frame_and_a_hint_only_while_empty(self) -> None:
+        picker = ModelPicker("Add", [OPUS], multi=True, action="add")
+        framed = list(walk(picker.container.children[1]))
+        self.assertIn(picker.search_window, framed)
+        self.assertTrue(any(isinstance(w, Window) and w.char == Border.VERTICAL for w in framed))
+        control = picker.search_window.content
+        assert isinstance(control, BufferControl)
+        hint = next(p for p in control.input_processors or [] if isinstance(p, ConditionalProcessor))
+        assert isinstance(hint.processor, AfterInput)
+        self.assertEqual(hint.processor.text, "Type a name or id, e.g. claude opus")
+        self.assertTrue(hint.filter())
+        picker.search.text = "c"
+        self.assertFalse(hint.filter())
 
     def test_no_matches_says_so(self) -> None:
         picker = ModelPicker("Add", [OPUS], multi=True, action="add", search="nope")
         self.assertIn("No models match.", text(picker))
-        self.assertTrue(picker.footer().startswith(" 0 of 1 "))
+        self.assertTrue(picker.footer().startswith("   0 of 1 "))
 
     def test_list_scrolls_to_keep_the_highlighted_row_visible(self) -> None:
         models: list[ModelMetadata] = [{"slug": f"m/{i}", "display_name": f"Model {i}", "provider": "openrouter"}
                                        for i in range(50)]
-        with screen(rows=20):
+        with screen(rows=24):
             picker = ModelPicker("Add", models, multi=True, action="add")
             self.assertEqual(picker.visible(), 6)
             for _ in range(10):
                 self.press(picker, "down")
-            shown = text(picker).splitlines()[1:]
+            shown = text(picker).splitlines()[2:-1]
             self.assertEqual(len(shown), 6)
             self.assertIn("❯ ○ Model 9", shown[-1])
             for _ in range(9):
                 self.press(picker, "up")
-            self.assertIn("❯ ○ Model 0", text(picker).splitlines()[1])
+            self.assertIn("❯ ○ Model 0", text(picker).splitlines()[2])
             picker.search.text = "Model 4"
             self.assertEqual(picker.top, 0)
 
     def test_tiny_screens_still_show_one_row(self) -> None:
-        with screen(rows=5):
+        with screen(rows=9):
             self.assertEqual(ModelPicker("Add", [OPUS, FREE], multi=True, action="add").visible(), 1)
 
 

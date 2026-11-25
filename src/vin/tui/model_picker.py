@@ -11,7 +11,12 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout.containers import HSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
-from prompt_toolkit.layout.processors import BeforeInput
+from prompt_toolkit.layout.processors import (
+    AfterInput,
+    BeforeInput,
+    ConditionalProcessor,
+)
+from prompt_toolkit.widgets import Frame
 
 from vin.tui.constants import PROVIDER_LABELS
 from vin.types import ModelMetadata
@@ -26,14 +31,14 @@ def context_label(model: ModelMetadata) -> str:
     return f"{round(n/1000)}K"
 
 
-def price_label(model: ModelMetadata) -> str:
+def price_labels(model: ModelMetadata) -> tuple[str, str]:
     input_price = model.get("input_price")
     output_price = model.get("output_price")
     if input_price is None or output_price is None:
-        return ""
+        return "", ""
     if input_price == 0 and output_price == 0:
-        return "free"
-    return f"{input_price:.2f} · {output_price:.2f}"
+        return "free", "free"
+    return f"{input_price:.2f}", f"{output_price:.2f}"
 
 
 class ModelPicker:
@@ -96,7 +101,18 @@ class ModelPicker:
 
         self.search_window = Window(
             BufferControl(
-                self.search, input_processors=[BeforeInput(" › ")], key_bindings=kb
+                self.search,
+                input_processors=[
+                    BeforeInput("Search  ", style="bold"),
+                    ConditionalProcessor(
+                        AfterInput(
+                            "Type a name or id, e.g. claude opus",
+                            style="class:placeholder",
+                        ),
+                        filter=Condition(lambda: not self.search.text),
+                    ),
+                ],
+                key_bindings=kb,
             ),
             height=1,
             always_hide_cursor=Condition(lambda: self.row is not None),
@@ -104,10 +120,10 @@ class ModelPicker:
         self.container = HSplit(
             [
                 Window(FormattedTextControl(self.header), height=1, style="bold"),
-                self.search_window,
+                Frame(self.search_window),
                 Window(
                     FormattedTextControl(self.render),
-                    height=lambda: Dimension.exact(self.visible() + 1),
+                    height=lambda: Dimension.exact(self.visible() + 3),
                 ),
                 Window(
                     FormattedTextControl(self.footer),
@@ -138,19 +154,19 @@ class ModelPicker:
         return [matches[self.row or 0]] if matches else []
 
     def visible(self) -> int:
-        return max(1, min(len(self.models), get_app().output.get_size().rows - 14))
+        return max(1, min(len(self.models), get_app().output.get_size().rows - 18))
 
     def render(self) -> StyleAndTextTuples:
         width = get_app().output.get_size().columns
-        name_width = max(20, width - 55)
+        name_width = max(20, width - 56)
         matches = self.matches()
         count = self.visible()
-        lines: StyleAndTextTuples = [
-            (
-                "class:placeholder",
-                f"    {'Model': <{name_width}} {'Context':>7}  {'$/M in · out':>15}  Input\n",
-            )
-        ]
+        rule = ("class:placeholder", f"  {'─' * (width - 4)}\n")
+        heading = (
+            f"    {'Model': <{name_width}}  {'Context':>7}  {'In $/M':>7}  "
+            f"{'Out $/M':>8}  Also accepts"
+        )
+        lines: StyleAndTextTuples = [("bold", heading[: width - 1] + "\n"), rule]
         if self.row is not None:
             if self.row < self.top:
                 self.top = self.row
@@ -173,12 +189,14 @@ class ModelPicker:
                 name += f" · {PROVIDER_LABELS[model['provider']]}"
             if len(name) > name_width:
                 name = name[: name_width - 1] + "…"
+            input_price, output_price = price_labels(model)
             line = (
-                f"{pointer}{mark} {name:<{name_width}} {context_label(model):>7}  "
-                f"{price_label(model):>15}  {' '.join(model.get('features', []))}"
+                f"{pointer}{mark} {name:<{name_width}}  {context_label(model):>7}  "
+                f"{input_price:>7}  {output_price:>8}  {' '.join(model.get('features', []))}"
             )
             style = "fg:#ffffff bg:#303b59 bold" if index == self.row else ""
             lines.append((style, line[: width - 1] + "\n"))
+        lines.append(rule)
         return lines
 
     def header(self) -> str:
@@ -187,9 +205,7 @@ class ModelPicker:
         )
 
     def footer(self) -> str:
-        text = (
-            f" {len(self.matches())} of {len(self.models)} · Type to search · ↑↓ move"
-        )
+        text = f"   {len(self.matches())} of {len(self.models)} · ↑↓ move"
         if self.multi:
             text += " · Space select"
         text += f" · Enter {self.action}"
