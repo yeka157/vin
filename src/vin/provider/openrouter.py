@@ -308,7 +308,7 @@ def list_openrouter_models() -> list[ModelMetadata]:
         raise RuntimeError(
             f"Could not load OpenRouter models (HTTP {error.code})."
         ) from None
-    except (URLError, TimeoutError, OSError):
+    except URLError, TimeoutError, OSError:
         raise RuntimeError("Could not connect to OpenRouter.") from None
     except ValueError:
         raise RuntimeError("OpenRouter returned an invalid model list.") from None
@@ -370,7 +370,7 @@ def load_openrouter_whitelist() -> list[ModelMetadata]:
         payload = cast(object, json.loads(WHITELIST_PATH.read_text(encoding="utf-8")))
     except FileNotFoundError:
         return []
-    except (OSError, ValueError):
+    except OSError, ValueError:
         raise RuntimeError("Could not read saved OpenRouter models.") from None
 
     try:
@@ -382,5 +382,5 @@ def load_openrouter_whitelist() -> list[ModelMetadata]:
 def save_openrouter_whitelist(models: list[ModelMetadata]) -> None:
     try:
         save_private_json(WHITELIST_PATH, models)
-    except (OSError, RuntimeError):
+    except OSError, RuntimeError:
         raise RuntimeError("Could not save OpenRouter models.") from None

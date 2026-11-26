@@ -100,7 +100,7 @@ def list_chatgpt_models(credentials: object) -> list[ModelMetadata]:
         raise RuntimeError(f"Could not load ChatGPT models (HTTP {status})") from None
     except OSError:
         raise RuntimeError("Could not connect to load ChatGPT models.") from None
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except json.JSONDecodeError, UnicodeDecodeError:
         raise RuntimeError("Model endpoint returned invalid JSON.") from None
 
     if not is_record(payload) or not is_list(payload.get("models")):
