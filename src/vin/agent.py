@@ -34,6 +34,7 @@ def tool_detail(name: str, arguments: str) -> str:
         "edit": "path",
         "bash": "command",
         "task": "description",
+        "web_search": "query",
     }
 
     key = keys.get(name)

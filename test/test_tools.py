@@ -73,7 +73,7 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(self.output(self.tools.read('empty')), '[empty file]')
 
     def test_every_tool_parameter_is_described(self) -> None:
-        for tool in response_tools(task=True):
+        for tool in response_tools(task=True, search=True):
             parameters = cast(dict[str, dict[str, dict[str, object]]], tool['parameters'])
             properties = parameters['properties']
             for name, schema in properties.items():
