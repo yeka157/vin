@@ -1,11 +1,12 @@
 # AGENTS.md
 
-Vin is a terminal coding agent in Python: a prompt-toolkit/Rich TUI, ChatGPT sign-in over OAuth, and an OpenAI Responses tool loop with four tools (`read`, `write`, `edit`, `bash`). This file is the single source of agent guidance for the repo; `CLAUDE.md` imports it.
+Vin is a terminal coding agent in Python: a prompt-toolkit/Rich TUI, ChatGPT sign-in over OAuth or an OpenRouter API key, and a provider-neutral tool loop with four tools (`read`, `write`, `edit`, `bash`). This file is the single source of agent guidance for the repo; `CLAUDE.md` imports it.
 
 ## Where things are
 
 - `src/vin/agent.py`: the provider-neutral tool loop (`run_agent_turn`), tool execution and compaction pruning. It never imports `openai`; a provider hands it a `request(history)` function.
-- `src/vin/provider/chatgpt.py`: everything ChatGPT-specific. It builds that `request` function, parses the stream and maps API errors to user messages.
+- `src/vin/provider/shared.py`: what every provider shares. `stream_reply` checks sign-in and model, connects, runs the agent loop and maps API errors to user messages. A provider passes only `connect`, its one-request `complete` function and any status codes with their own wording.
+- `src/vin/provider/chatgpt.py` and `src/vin/provider/openrouter.py`: the provider-specific parts: the wire format (Responses or Chat Completions), sign-in details and the model list.
 - `src/vin/provider/events.py`: the event queue between the worker thread and the UI.
 - `src/vin/tools.py`: the four tools and `TOOL_REGISTRY`.
 - `src/vin/tui/`: the app (`app.py` holds `VinApp`, `stream_reply` and the command receiver), key bindings, layout and transcript rendering.

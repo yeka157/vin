@@ -421,7 +421,7 @@ class StreamingResponseTests(unittest.TestCase):
         failures.extend([
             (openai.APITimeoutError(request), "timed out", "error"),
             (openai.APIConnectionError(request=request, message="fake-access-token"), "connect", "error"),
-            (openai.APIError("fake-access-token", request, body=None), "failed", "error"),
+            (openai.APIError("fake-access-token", request, body=None), "did not complete", "error"),
             (RuntimeError("fake-access-token"), "failed", "error"),
         ])
         for error, hint, kind in failures:

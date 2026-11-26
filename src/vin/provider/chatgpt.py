@@ -13,18 +13,15 @@ from typing import (
     runtime_checkable,
 )
 
-from vin.agent import CONTEXT_FULL, AgentError, context_too_long, run_reply
+from vin.agent import AgentError
+from vin.provider.shared import openai_client, stream_reply
 from vin.provider.prompts import instructions
 from vin.types import History, ModelMetadata, is_record, is_list, json_value
-from vin.provider.events import (
-    EventSender,
-    ReplyEvent,
-    make_senders,
-)
-import re
+from vin.provider.events import EventSender, ReplyEvent
 
 if TYPE_CHECKING:
     from http.client import HTTPResponse
+    from openai import OpenAI
     from openai.types.responses import (
         Response,
         ResponseOutputItem,
@@ -243,31 +240,38 @@ def _request_response(
     raise AgentError("ChatGPT stream ended before completion.")
 
 
-def _error_message(
-    error: Exception, access_token: str
-) -> tuple[Literal["error", "rate_limit"], str]:
-    import openai
+def _complete(
+    client: "OpenAI",
+    model: str,
+    history: History,
+    send: EventSender,
+    cancel_event: Event,
+    *,
+    compact_only: bool,
+    subagent: bool,
+    task: bool,
+) -> tuple[History, bool] | None:
+    completed = _request_response(
+        _wire_client(client),
+        model,
+        history,
+        send,
+        cancel_event,
+        compact_only=compact_only,
+        subagent=subagent,
+        task=task,
+    )
+    if completed is None:
+        return None
 
-    if isinstance(error, openai.APITimeoutError):
-        return ("error", "ChatGPT request timed out. Please try again.")
-    if isinstance(error, openai.APIStatusError):
-        if error.status_code in (400, 413) and context_too_long(error):
-            return ("error", CONTEXT_FULL)
-        message = f"ChatGPT request failed (HTTP {error.status_code})."
-        for label, value in (("code", error.code), ("param", error.param)):
-            if (
-                isinstance(value, str)
-                and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,100}", value)
-                and access_token.strip() not in value
-            ):
-                message += f" {label}={value}."
-
-        if error.status_code in (401, 403):
-            message += " Sign in again with /login."
-        return ("rate_limit" if error.status_code == 429 else "error", message)
-    if isinstance(error, openai.APIConnectionError):
-        return ("error", "Could not connect to ChatGPT. Please try again.")
-    return ("error", "ChatGPT request failed. Please try again.")
+    response, has_text = completed
+    items: History = []
+    for item in response.output:
+        dumped = json_value(cast(object, item.model_dump(exclude_none=True)))
+        if not isinstance(dumped, dict):
+            raise AgentError("ChatGPT returned invalid response output.")
+        items.append(dumped)
+    return items, has_text
 
 
 def stream_chatgpt_response(
@@ -283,77 +287,29 @@ def stream_chatgpt_response(
     subagent_budget: int = 8,
 ) -> None:
     """Run on a worker thread; publish text, complete, or error queue events."""
-
-    send, subagent_send = make_senders(events, cancel_event)
-
-    if cancel_event.is_set():
-        return
-
-    credential_fields = credentials if is_record(credentials) else {}
-    access_token = credential_fields.get("access_token")
-    if not isinstance(access_token, str) or not access_token.strip():
-        send("error", "Sign in with /login before sending a message.")
-        return
-
-    scopes: object = credential_fields.get("scopes") or list[object]()
-    if not is_list(scopes) or "chatgpt.tokens.use.direct" not in scopes:
-        send("error", "ChatGPT plan usage is not enabled. Sign in again with /login.")
-        return
-
-    if not isinstance(model, str) or not model.strip():
-        send("error", "Choose a model with /model before sending a message.")
-        return
-
-    import openai
-
-    client = openai.OpenAI(
-        api_key=access_token,
-        base_url="https://api.openai.com/v1",
-        timeout=60,
-        max_retries=2,
-    )
-    wire = _wire_client(client)
-
-    def request(
-        history: History, sender: EventSender, subagent: bool, compact: bool
-    ) -> tuple[History, bool] | None:
-        completed = _request_response(
-            wire,
-            model,
-            history,
-            sender,
-            cancel_event,
-            compact_only=compact,
-            subagent=subagent,
-            task=subagents,
-        )
-        if completed is None:
-            return None
-
-        response, has_text = completed
-
-        items: History = []
-
-        for item in response.output:
-            dumped = json_value(cast(object, item.model_dump(exclude_none=True)))
-
-            if not isinstance(dumped, dict):
-                raise AgentError("ChatGPT returned invalid response output.")
-
-            items.append(dumped)
-
-        return items, has_text
-
-    run_reply(
-        client,
-        request,
+    fields = credentials if is_record(credentials) else {}
+    token = fields.get("access_token")
+    scopes: object = fields.get("scopes") or list[object]()
+    stream_reply(
+        "ChatGPT",
+        token if isinstance(token, str) else None,
+        model,
         messages,
-        send,
-        subagent_send,
+        events,
         cancel_event,
-        error_message=lambda error: _error_message(error, access_token),
-        compact_only=compact_only,
+        connect=openai_client("https://api.openai.com/v1"),
+        complete=_complete,
+        statuses={
+            401: ("error", "ChatGPT request failed (HTTP 401). Sign in again with /login."),
+            403: ("error", "ChatGPT request failed (HTTP 403). Sign in again with /login."),
+        },
+        problem=(
+            None
+            if is_list(scopes) and "chatgpt.tokens.use.direct" in scopes
+            else "ChatGPT plan usage is not enabled. Sign in again with /login."
+        ),
         compact_threshold=compact_threshold,
+        compact_only=compact_only,
         subagents=subagents,
         subagent_budget=subagent_budget,
     )

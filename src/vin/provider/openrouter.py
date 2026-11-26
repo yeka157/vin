@@ -4,14 +4,15 @@ from queue import SimpleQueue
 from threading import Event
 
 from urllib.error import HTTPError, URLError
-from vin.agent import CONTEXT_FULL, AgentError, context_too_long, run_reply
+from vin.agent import AgentError
 from vin.auth.credentials import save_private_json
-from vin.provider.events import EventSender, ReplyEvent, make_senders
+from vin.provider.events import EventSender, ReplyEvent
+from vin.provider.shared import openai_client, stream_reply
 from vin.provider.model_cache import parse_models
 from vin.types import History, ModelMetadata, is_string_list
 from vin.provider.prompts import instructions
 from vin.types import is_list, is_record
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 from http.client import HTTPResponse
 from urllib.request import urlopen
 
@@ -185,42 +186,6 @@ def _request_completion(
     return items, bool(reply.strip())
 
 
-def _error_message(error: Exception) -> tuple[Literal["error", "rate_limit"], str]:
-    import openai
-
-    if isinstance(error, openai.APITimeoutError):
-        return ("error", "OpenRouter request timed out. Please try again.")
-    if isinstance(error, openai.APIStatusError):
-        if error.status_code in (400, 413) and context_too_long(error):
-            return ("error", CONTEXT_FULL)
-        if error.status_code == 401:
-            return (
-                "error",
-                "OpenRouter key was rejected. Use /login to enter a new one.",
-            )
-        if error.status_code == 402:
-            return (
-                "error",
-                "OpenRouter credits are used up. Add credits and try again.",
-            )
-        if error.status_code == 403:
-            return (
-                "error",
-                "OpenRouter blocked this request (HTTP 403). Check your key's limits or try another model.",
-            )
-        if error.status_code == 429:
-            return (
-                "rate_limit",
-                "OpenRouter rate limit reached (HTTP 429). Please wait and try again.",
-            )
-        return ("error", f"OpenRouter request failed (HTTP {error.status_code}).")
-    if isinstance(error, openai.APIConnectionError):
-        return ("error", "Could not connect to OpenRouter. Please try again.")
-    if isinstance(error, openai.APIError):
-        return ("error", "OpenRouter response did not complete. Please try again.")
-    return ("error", "OpenRouter request failed. Please try again.")
-
-
 def stream_openrouter_response(
     account: object,
     model: object,
@@ -233,51 +198,24 @@ def stream_openrouter_response(
     subagents: bool = True,
     subagent_budget: int = 8,
 ) -> None:
-    send, subagent_send = make_senders(events, cancel_event)
-    if cancel_event.is_set():
-        return
     key = account.get("key") if is_record(account) else None
-    if not isinstance(key, str) or not key.strip():
-        send("error", "Sign in with /login before sending a message.")
-        return
-    if not isinstance(model, str) or not model.strip():
-        send("error", "Choose a model with /model before sending a message.")
-        return
-
-    import openai
-
-    client = openai.OpenAI(
-        api_key=key,
-        base_url="https://openrouter.ai/api/v1",
-        default_headers={"X-OpenRouter-Title": "Vin"},
-        timeout=60,
-        max_retries=2,
-    )
-
-    def request(
-        history: History, sender: EventSender, subagent: bool, compact: bool
-    ) -> tuple[History, bool] | None:
-        return _request_completion(
-            client,
-            model,
-            history,
-            sender,
-            cancel_event,
-            compact_only=compact,
-            subagent=subagent,
-            task=subagents,
-        )
-
-    run_reply(
-        client,
-        request,
+    stream_reply(
+        "OpenRouter",
+        key if isinstance(key, str) else None,
+        model,
         messages,
-        send,
-        subagent_send,
+        events,
         cancel_event,
-        error_message=_error_message,
-        compact_only=compact_only,
+        connect=openai_client("https://openrouter.ai/api/v1", {"X-OpenRouter-Title": "Vin"}),
+        complete=_request_completion,
+        statuses={
+            401: ("error", "OpenRouter key was rejected. Use /login to enter a new one."),
+            402: ("error", "OpenRouter credits are used up. Add credits and try again."),
+            403: ("error", "OpenRouter blocked this request (HTTP 403). Check your key's limits or try another model."),
+            429: ("rate_limit", "OpenRouter rate limit reached (HTTP 429). Please wait and try again."),
+        },
         compact_threshold=compact_threshold,
+        compact_only=compact_only,
         subagents=subagents,
         subagent_budget=subagent_budget,
     )
