@@ -321,7 +321,16 @@ class VinApp:
             if _task_is_cancelling():
                 raise
             return None
-        return await asyncio.to_thread(check_search_key, key)
+        was_loading = self.loading_model
+        self.auth_status = "Checking Tavily key…"
+        self.loading_model = True
+        self.app.invalidate()
+        try:
+            return await asyncio.to_thread(check_search_key, key)
+        finally:
+            self.auth_status = None
+            self.loading_model = was_loading
+            self.app.invalidate()
 
     async def toggle_search(self) -> str | None:
         current = self.search_settings
@@ -1498,32 +1507,18 @@ class VinApp:
         self.loading_model = True
         self.run_conversation()
 
-    async def change_settings(self) -> str | None:
+    async def change_subagent_settings(self) -> str | None:
         settings = self.subagent_settings
-        search_on = self.search_settings is not None and self.search_settings["enabled"]
         rows: list[tuple[str, str]] = [
             ("enabled", f"Subagents: {'on' if settings['enabled'] else 'off'}"),
-            ("budget", f"Subagent request limit: {settings['budget']}"),
-            ("search", f"Web search: {'on' if search_on else 'off'}"),
+            ("budget", f"Request limit: {settings['budget']}"),
         ]
-        if self.search_settings is not None:
-            rows.append(
-                (
-                    "search_key",
-                    f"Web search key: {mask_key(self.search_settings['key'])}",
-                )
-            )
         try:
-            choice = await self.choose_inline("Settings", rows)
+            choice = await self.choose_inline("Subagents", rows)
         except asyncio.CancelledError:
             if _task_is_cancelling():
                 raise
             return None
-
-        if choice == "search":
-            return await self.toggle_search()
-        if choice == "search_key":
-            return await self.change_search_key()
         if choice == "enabled":
             updated: SubagentSettings = {
                 "enabled": not settings["enabled"],
@@ -1546,6 +1541,39 @@ class VinApp:
         save_subagent_settings(updated)
         self.subagent_settings = updated
         return f"Subagents {'on' if updated['enabled'] else 'off'} · request limit {updated['budget']}"
+
+    async def change_web_search_settings(self) -> str | None:
+        current = self.search_settings
+        on = current is not None and current["enabled"]
+        rows: list[tuple[str, str]] = [
+            ("enabled", f"Web search: {'on' if on else 'off'}"),
+        ]
+        if current is not None:
+            rows.append(("key", f"Key: {mask_key(current['key'])}"))
+        try:
+            choice = await self.choose_inline("Web search", rows)
+        except asyncio.CancelledError:
+            if _task_is_cancelling():
+                raise
+            return None
+        if choice == "key":
+            return await self.change_search_key()
+        return await self.toggle_search()
+
+    async def change_settings(self) -> str | None:
+        try:
+            choice = await self.choose_inline(
+                "Settings", [("subagents", "Subagents"), ("search", "Web search")]
+            )
+        except asyncio.CancelledError:
+            if _task_is_cancelling():
+                raise
+            return None
+        if choice == "search":
+            return await self.change_web_search_settings()
+        elif choice == "subagents":
+            return await self.change_subagent_settings()
+        return None
 
     async def open_task(self) -> str | None:
         if not self.subagents:
