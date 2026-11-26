@@ -244,7 +244,7 @@ class SearchKeyTests(unittest.TestCase):
         self.assertIsNone(search.load_search_key())
 
     def test_saved_key_is_trimmed(self) -> None:
-        _ = self.path.write_text(json.dumps({"key": f"  {KEY}\n"}), encoding="utf-8")
+        _ = self.path.write_text(json.dumps({"key": f"  {KEY}\n", "enabled": False}), encoding="utf-8")
         self.assertEqual(search.load_search_key(), KEY)
 
     def test_unreadable_or_invalid_files_are_errors(self) -> None:
@@ -252,7 +252,7 @@ class SearchKeyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Could not read the saved web search key"):
             _ = search.load_search_key()
 
-        for content in ([KEY], {}, {"key": ""}, {"key": "   "}, {"key": 5}):
+        for content in ([KEY], {}, {"key": ""}, {"key": "   ", "enabled": True}, {"key": 5, "enabled": True}, {"key": KEY}):
             with self.subTest(content=content):
                 _ = self.path.write_text(json.dumps(content), encoding="utf-8")
                 with self.assertRaisesRegex(RuntimeError, "Saved web search key is invalid"):

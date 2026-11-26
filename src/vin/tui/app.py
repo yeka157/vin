@@ -47,6 +47,12 @@ from vin.auth.openrouter import (
     mask_key,
     save_openrouter_account,
 )
+from vin.auth.search import (
+    check_search_key,
+    delete_search_settings,
+    load_search_settings,
+    save_search_settings,
+)
 from vin.provider.chatgpt import list_chatgpt_models, stream_chatgpt_response
 from vin.provider.openrouter import (
     list_openrouter_models,
@@ -85,6 +91,7 @@ from vin.types import (
     History,
     ModelMetadata,
     ModelPreference,
+    SearchSettings,
     SessionRecord,
     Subagent,
     SubagentSettings,
@@ -222,6 +229,7 @@ class ReplyOptions(TypedDict, total=False):
     compact_only: bool
     subagents: bool
     subagent_budget: int
+    search: bool
 
 
 class VinApp:
@@ -274,6 +282,7 @@ class VinApp:
         self.secret_future: asyncio.Future[str] | None = None
         self.picker: ModelPicker | None = None
         self.exit_armed_until = 0.0
+        self.search_settings: SearchSettings | None = None
 
     async def ask_secret(self, message: str) -> str:
         if self.choice_future is not None or self.secret_future is not None:
@@ -304,6 +313,53 @@ class VinApp:
             self.choice_menu = None
             self.session.layout.focus(self.input_window)
             self.app.invalidate()
+
+    async def ask_search_key(self) -> str | None:
+        try:
+            key = await self.ask_secret("Paste your Tavily API key")
+        except asyncio.CancelledError:
+            if _task_is_cancelling():
+                raise
+            return None
+        return await asyncio.to_thread(check_search_key, key)
+
+    async def toggle_search(self) -> str | None:
+        current = self.search_settings
+        if current is None:
+            key = await self.ask_search_key()
+            if key is None:
+                return None
+            updated: SearchSettings = {"key": key, "enabled": True}
+        else:
+            updated = {"key": current["key"], "enabled": not current["enabled"]}
+        save_search_settings(updated)
+        self.search_settings = updated
+        return f"Web search {'on' if updated['enabled'] else 'off'}"
+
+    async def change_search_key(self) -> str | None:
+        current = self.search_settings
+        if current is None:
+            return None
+        try:
+            choice = await self.choose_inline(
+                "Web search key", [("replace", "Replace key"), ("remove", "Remove key")]
+            )
+        except asyncio.CancelledError:
+            if _task_is_cancelling():
+                raise
+            return None
+        if choice == "remove":
+            delete_search_settings()
+            self.search_settings = None
+            return "Web search key removed · web search off"
+        else:
+            key = await self.ask_search_key()
+            if key is None:
+                return None
+            updated: SearchSettings = {"key": key, "enabled": current["enabled"]}
+            save_search_settings(updated)
+            self.search_settings = updated
+            return f"Web search key replaced · {mask_key(key)}"
 
     async def sign_in_openrouter(self) -> None:
         try:
@@ -561,6 +617,9 @@ class VinApp:
 
             if not compact_only:
                 options["subagents"] = self.subagent_settings["enabled"]
+                options["search"] = (
+                    self.search_settings is not None and self.search_settings["enabled"]
+                )
                 options["subagent_budget"] = self.subagent_settings["budget"]
 
             Thread(
@@ -1325,6 +1384,12 @@ class VinApp:
                     {"role": "notice", "content": Text(str(error), style="red")}
                 )
             try:
+                self.search_settings = load_search_settings()
+            except RuntimeError as error:
+                self.transcript.append(
+                    {"role": "notice", "content": Text(str(error), style="red")}
+                )
+            try:
                 self.openrouter = load_openrouter_account()
                 if self.openrouter is not None:
                     self.set_models("openrouter", load_openrouter_whitelist())
@@ -1435,22 +1500,30 @@ class VinApp:
 
     async def change_settings(self) -> str | None:
         settings = self.subagent_settings
-        try:
-            choice = await self.choose_inline(
-                "Settings",
-                [
-                    (
-                        "enabled",
-                        f"Subagents: {'on' if settings['enabled'] else 'off'}",
-                    ),
-                    ("budget", f"Subagent request limit: {settings['budget']}"),
-                ],
+        search_on = self.search_settings is not None and self.search_settings["enabled"]
+        rows: list[tuple[str, str]] = [
+            ("enabled", f"Subagents: {'on' if settings['enabled'] else 'off'}"),
+            ("budget", f"Subagent request limit: {settings['budget']}"),
+            ("search", f"Web search: {'on' if search_on else 'off'}"),
+        ]
+        if self.search_settings is not None:
+            rows.append(
+                (
+                    "search_key",
+                    f"Web search key: {mask_key(self.search_settings['key'])}",
+                )
             )
+        try:
+            choice = await self.choose_inline("Settings", rows)
         except asyncio.CancelledError:
             if _task_is_cancelling():
                 raise
             return None
 
+        if choice == "search":
+            return await self.toggle_search()
+        if choice == "search_key":
+            return await self.change_search_key()
         if choice == "enabled":
             updated: SubagentSettings = {
                 "enabled": not settings["enabled"],

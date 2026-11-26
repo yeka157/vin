@@ -39,6 +39,7 @@ from urllib.request import Request, urlopen
 from aisuite.utils.tools import Tools
 from openai.types.responses import FunctionToolParam
 
+from vin.auth.search import TAVILY_SEARCH_URL
 from vin.types import is_list, is_record
 
 LAUNCH_DIR = Path.cwd().resolve()
@@ -48,7 +49,6 @@ FILE_MUTATION_LOCK = Lock()
 _TOOL_CANCEL_EVENT: ContextVar[Event | None] = ContextVar(
     "vin_tool_cancel_event", default=None
 )
-TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 SEARCH_TIMEOUT = 10
 MAX_SNIPPET_CHARS = 300
 

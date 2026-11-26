@@ -157,6 +157,21 @@ class SubagentTranscriptTests(unittest.IsolatedAsyncioTestCase):
         options = cast(dict[str, object], self.stream.call_args.kwargs)
         self.assertEqual((options["subagents"], options["subagent_budget"]), (False, 3))
 
+    async def test_a_turn_passes_web_search_on_when_it_is_on(self) -> None:
+        self.owner.search_settings = {"key": "tvly-key", "enabled": True}
+        await self.start_turn()
+        self.assertIs(cast(dict[str, object], self.stream.call_args.kwargs)["search"], True)
+
+    async def test_a_turn_passes_web_search_off_when_it_is_off(self) -> None:
+        self.owner.search_settings = {"key": "tvly-key", "enabled": False}
+        await self.start_turn()
+        self.assertIs(cast(dict[str, object], self.stream.call_args.kwargs)["search"], False)
+
+    async def test_a_turn_passes_web_search_off_without_a_key(self) -> None:
+        self.owner.search_settings = None
+        await self.start_turn()
+        self.assertIs(cast(dict[str, object], self.stream.call_args.kwargs)["search"], False)
+
     async def test_a_failed_task_marks_its_subagent_failed(self) -> None:
         task, events = await self.start_turn()
         await self.emit(events, ("tool_started", TASK_STARTED), tagged(("text", "Trying")),

@@ -1,11 +1,16 @@
 """Saved model choice and subagent settings, /settings and /tasks."""
 
 import asyncio
+from email.message import Message
+import io
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
+from typing import Literal, cast
 import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
+from urllib.error import HTTPError, URLError
+from urllib.request import Request
 
 from rich.text import Text
 
@@ -13,7 +18,20 @@ from provider_typing_helpers import credentials as fixture_credentials
 from vin.provider import preferences
 from vin.tui import app as app_module
 from vin.tui.app import VinApp
-from vin.types import Subagent, SubagentSettings
+from vin.auth import search
+from vin.types import SearchSettings, Subagent, SubagentSettings
+
+
+class Response(io.BytesIO):
+    def __enter__(self) -> "Response":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
+def http_error(code: int) -> HTTPError:
+    return HTTPError(search.TAVILY_SEARCH_URL, code, "error", Message(), io.BytesIO(b"{}"))
 
 
 class ModelPreferenceTests(unittest.TestCase):
@@ -148,7 +166,8 @@ class SettingsCommandTests(unittest.TestCase):
         self.assertEqual(asyncio.run(self.app.change_settings()), "Subagents off · request limit 8")
 
         self.inline.assert_awaited_once_with(
-            "Settings", [("enabled", "Subagents: on"), ("budget", "Subagent request limit: 8")])
+            "Settings", [("enabled", "Subagents: on"), ("budget", "Subagent request limit: 8"),
+                         ("search", "Web search: off")])
         off: SubagentSettings = {"enabled": False, "budget": 8}
         self.save.assert_called_once_with(off)
         self.assertEqual(self.app.subagent_settings, off)
@@ -193,6 +212,216 @@ class SettingsCommandTests(unittest.TestCase):
         self.assertEqual(entry["content"].style, "red")
         self.assertEqual(self.app.subagent_settings, {"enabled": True, "budget": 8})
         self.assertEqual(self.app.selected_model, "m")
+
+
+KEY = "tvly-dev-secret-key"
+ON: SearchSettings = {"key": KEY, "enabled": True}
+OFF: SearchSettings = {"key": KEY, "enabled": False}
+
+
+class SearchSettingsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "search.json"
+        self.enterContext(patch.object(search, "SEARCH_KEY_PATH", self.path))
+
+    def test_saved_settings_load_back_and_delete(self) -> None:
+        self.assertIsNone(search.load_search_settings())
+        _ = search.save_search_settings(ON)
+        self.assertEqual(search.load_search_settings(), ON)
+        self.assertEqual(search.load_search_key(), KEY)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+        search.delete_search_settings()
+        self.assertFalse(self.path.exists())
+        search.delete_search_settings()
+
+    def test_enabled_must_be_a_boolean(self) -> None:
+        for enabled in (None, 1, "true"):
+            with self.subTest(enabled=enabled):
+                _ = self.path.write_text(json.dumps({"key": KEY, "enabled": enabled}), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "Saved web search key is invalid"):
+                    _ = search.load_search_settings()
+
+    def test_failed_save_and_delete_say_so(self) -> None:
+        with patch("vin.auth.credentials.os.replace", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(RuntimeError, "Could not save the web search key"):
+                _ = search.save_search_settings(ON)
+        with patch.object(Path, "unlink", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(RuntimeError, "Could not remove the saved web search key"):
+                search.delete_search_settings()
+
+
+class CheckSearchKeyTests(unittest.TestCase):
+    def test_key_is_trimmed_and_checked_with_one_search(self) -> None:
+        with patch.object(search, "urlopen", return_value=Response(b"{}")) as urlopen:
+            self.assertEqual(search.check_search_key(f"  {KEY}\n"), KEY)
+
+        request = cast(Request, urlopen.call_args.args[0])
+        self.assertEqual(request.full_url, search.TAVILY_SEARCH_URL)
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.get_header("Authorization"), f"Bearer {KEY}")
+        self.assertEqual(request.get_header("Content-type"), "application/json")
+        self.assertEqual(json.loads(cast(bytes, request.data))["max_results"], 1)
+
+    def test_empty_key_is_rejected_without_a_request(self) -> None:
+        with patch.object(search, "urlopen") as urlopen:
+            with self.assertRaisesRegex(RuntimeError, "Paste a Tavily API key"):
+                _ = search.check_search_key("   ")
+        urlopen.assert_not_called()
+
+    def test_failures_have_their_own_messages_without_the_key(self) -> None:
+        cases: list[tuple[BaseException, str]] = [
+            (http_error(401), "Tavily key was rejected."),
+            (http_error(403), "Tavily key was rejected."),
+            (http_error(432), "Could not check the Tavily key (HTTP 432)."),
+            (http_error(500), "Could not check the Tavily key (HTTP 500)."),
+            (URLError("offline"), "Could not connect to Tavily."),
+            (TimeoutError("timed out"), "Could not connect to Tavily."),
+        ]
+        for error, message in cases:
+            with self.subTest(message=message), patch.object(search, "urlopen", side_effect=error):
+                with self.assertRaises(RuntimeError) as raised:
+                    _ = search.check_search_key(KEY)
+                self.assertEqual(str(raised.exception), message)
+                self.assertIsNone(raised.exception.__cause__)
+
+
+class SearchSettingsCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.app = VinApp()
+        self.inline = AsyncMock()
+        self.secret = AsyncMock(return_value=f" {KEY} ")
+        def check(key: str) -> str:
+            return key.strip()
+
+        self.check = Mock(side_effect=check)
+        self.save = Mock()
+        self.delete = Mock()
+        self.enterContext(patch.object(self.app, "choose_inline", self.inline))
+        self.enterContext(patch.object(self.app, "ask_secret", self.secret))
+        self.enterContext(patch.multiple(app_module, check_search_key=self.check,
+                                         save_search_settings=self.save,
+                                         delete_search_settings=self.delete,
+                                         save_subagent_settings=Mock()))
+
+    def settings(self) -> str | Text | None:
+        return asyncio.run(self.app.change_settings())
+
+    def test_menu_shows_the_key_row_only_when_a_key_is_saved(self) -> None:
+        self.inline.side_effect = asyncio.CancelledError()
+        self.app.search_settings = ON
+        self.assertIsNone(self.settings())
+        rows = cast(list[tuple[str, str]], self.inline.await_args_list[-1].args[1])
+        self.assertEqual(rows[2:], [("search", "Web search: on"),
+                                    ("search_key", "Web search key: tvly-dev-•••-key")])
+
+    def test_first_turn_on_asks_for_the_key_checks_it_and_saves_it_on(self) -> None:
+        self.inline.return_value = "search"
+
+        self.assertEqual(self.settings(), "Web search on")
+
+        self.secret.assert_awaited_once_with("Paste your Tavily API key")
+        self.check.assert_called_once_with(f" {KEY} ")
+        self.save.assert_called_once_with(ON)
+        self.assertEqual(self.app.search_settings, ON)
+
+    def test_bad_key_saves_nothing_and_stays_off(self) -> None:
+        self.inline.return_value = "search"
+        self.check.side_effect = RuntimeError("Tavily key was rejected.")
+
+        with self.assertRaisesRegex(RuntimeError, "Tavily key was rejected"):
+            _ = self.settings()
+        self.save.assert_not_called()
+        self.assertIsNone(self.app.search_settings)
+
+    def test_escape_at_the_key_prompt_saves_nothing(self) -> None:
+        self.inline.return_value = "search"
+        self.secret.side_effect = asyncio.CancelledError()
+
+        self.assertIsNone(self.settings())
+        self.check.assert_not_called()
+        self.save.assert_not_called()
+        self.assertIsNone(self.app.search_settings)
+
+    def test_with_a_saved_key_the_switch_flips_without_asking(self) -> None:
+        self.inline.return_value = "search"
+        self.app.search_settings = ON
+        self.assertEqual(self.settings(), "Web search off")
+        self.assertEqual(self.app.search_settings, OFF)
+        self.assertEqual(self.settings(), "Web search on")
+        self.assertEqual(self.app.search_settings, ON)
+        self.secret.assert_not_awaited()
+        self.assertEqual(self.save.call_args_list, [call(OFF), call(ON)])
+
+    def test_failed_save_keeps_the_current_setting(self) -> None:
+        self.inline.return_value = "search"
+        self.app.search_settings = OFF
+        self.save.side_effect = RuntimeError("Could not save the web search key.")
+
+        with self.assertRaisesRegex(RuntimeError, "Could not save the web search key"):
+            _ = self.settings()
+        self.assertEqual(self.app.search_settings, OFF)
+
+    def test_replacing_the_key_keeps_the_switch(self) -> None:
+        self.inline.side_effect = ["search_key", "replace"]
+        self.app.search_settings = OFF
+        self.secret.return_value = "tvly-dev-another-key"
+
+        self.assertEqual(self.settings(), "Web search key replaced · tvly-dev-•••-key")
+
+        self.assertEqual(self.inline.await_args_list[1],
+                         call("Web search key", [("replace", "Replace key"), ("remove", "Remove key")]))
+        replaced: SearchSettings = {"key": "tvly-dev-another-key", "enabled": False}
+        self.save.assert_called_once_with(replaced)
+        self.assertEqual(self.app.search_settings, replaced)
+
+    def test_removing_the_key_turns_web_search_off(self) -> None:
+        self.inline.side_effect = ["search_key", "remove"]
+        self.app.search_settings = ON
+
+        self.assertEqual(self.settings(), "Web search key removed · web search off")
+
+        self.delete.assert_called_once_with()
+        self.save.assert_not_called()
+        self.assertIsNone(self.app.search_settings)
+
+    def test_escape_in_the_key_menu_or_prompt_changes_nothing(self) -> None:
+        for side_effect, secret in (
+            (["search_key", asyncio.CancelledError()], None),
+            (["search_key", "replace"], asyncio.CancelledError()),
+        ):
+            with self.subTest(secret=secret):
+                self.inline.side_effect = side_effect
+                self.secret.side_effect = secret
+                self.app.search_settings = ON
+                self.assertIsNone(self.settings())
+                self.save.assert_not_called()
+                self.delete.assert_not_called()
+                self.assertEqual(self.app.search_settings, ON)
+
+    def test_saved_settings_load_at_startup_and_a_bad_file_shows_a_notice(self) -> None:
+        self.app.credentials = fixture_credentials("token")
+        common = {
+            "load_subagent_settings": Mock(return_value={"enabled": True, "budget": 8}),
+            "load_model_preference": Mock(return_value={"provider": "chatgpt", "model": "m"}),
+            "load_cached_chatgpt_models": Mock(return_value=[]),
+            "load_openrouter_account": Mock(return_value=None),
+        }
+        with patch.multiple(app_module, create=True, load_search_settings=Mock(return_value=ON), **common):
+            asyncio.run(self.app.initialize_session())
+        self.assertEqual(self.app.search_settings, ON)
+        self.assertEqual(self.app.transcript, [])
+
+        app = VinApp()
+        app.credentials = fixture_credentials("token")
+        bad = Mock(side_effect=RuntimeError("Saved web search key is invalid."))
+        with patch.multiple(app_module, create=True, load_search_settings=bad, **common):
+            asyncio.run(app.initialize_session())
+        entry, = app.transcript
+        self.assertEqual(str(entry["content"]), "Saved web search key is invalid.")
+        self.assertIsNone(app.search_settings)
 
 
 class TasksCommandTests(unittest.TestCase):

@@ -98,7 +98,7 @@ class OpenRouterStreamTests(unittest.TestCase):
         self.enterContext(patch("openai._base_client.time.sleep", side_effect=self.sleeps.append))
 
     def run_stream(self, responses: Sequence[Fixture], *, account: object = ..., model: object = "test/model",
-                   compact_only: bool = False, subagents: bool = True,
+                   compact_only: bool = False, subagents: bool = True, search: bool = False,
                    execute: Callable[[list[ToolCall]], list[str]] | None = None) -> list[ReplyEvent]:
         real_openai = openai.OpenAI
 
@@ -136,7 +136,7 @@ class OpenRouterStreamTests(unittest.TestCase):
               redirect_stdout(output), redirect_stderr(output)):
             stream_openrouter_response({"key": KEY, "label": "test"} if account is ... else account, model,
                                        list(self.input), self.events, self.cancel,
-                                       compact_only=compact_only, subagents=subagents)
+                                       compact_only=compact_only, subagents=subagents, search=search)
         self.assertNotIn(KEY, output.getvalue())
         self.assertTrue(all(client.is_closed for client in self.clients), "Close every SDK/HTTP client.")
         result: list[ReplyEvent] = []
@@ -188,6 +188,12 @@ class OpenRouterStreamTests(unittest.TestCase):
         self.assertEqual(records(body["messages"])[0], {"role": "system", "content": prompts.SYSTEM_PROMPT})
         self.assertEqual({str(record(tool["function"])["name"]) for tool in records(body["tools"])},
                          {"read", "write", "edit", "bash"})
+
+    def test_web_search_on_offers_the_web_search_tool(self) -> None:
+        self.run_stream([[chunk("Done", finish="stop")]], search=True)
+        body, = self.bodies
+        self.assertEqual({str(record(tool["function"])["name"]) for tool in records(body["tools"])},
+                         {"read", "write", "edit", "bash", "task", "web_search"})
 
     def test_compaction_request_sends_no_tools_and_no_text(self) -> None:
         events = self.run_stream([[chunk("Summary", finish="stop")]], compact_only=True)

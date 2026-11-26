@@ -37,6 +37,7 @@ class StreamReplyTests(unittest.TestCase):
         self.cancel = Event()
         self.clients: list[FakeClient] = []
         self.keys: list[str] = []
+        self.searches: list[bool] = []
 
     def connect(self, key: str) -> FakeClient:
         self.keys.append(key)
@@ -44,15 +45,21 @@ class StreamReplyTests(unittest.TestCase):
         self.clients.append(client)
         return client
 
-    def run_reply(self, key: str | None = SECRET, model: object = "any/model", problem: str | None = None) -> list[ReplyEvent]:
+    def run_reply(self, key: str | None = SECRET, model: object = "any/model", problem: str | None = None,
+                  search: bool | None = None) -> list[ReplyEvent]:
         def complete(client: FakeClient, model: str, history: History, send: EventSender, cancel_event: Event, *,
-                     compact_only: bool, subagent: bool, task: bool) -> tuple[History, bool]:
+                     compact_only: bool, subagent: bool, task: bool, search: bool) -> tuple[History, bool]:
+            self.searches.append(search)
             send("text", f"answer from {model}")
             return [{"type": "message", "role": "assistant",
                      "content": [{"type": "output_text", "text": "answer"}]}], True
 
-        stream_reply("Fake", key, model, [{"role": "user", "content": "hi"}], self.events, self.cancel,
-                     connect=self.connect, complete=complete, problem=problem)
+        if search is None:
+            stream_reply("Fake", key, model, [{"role": "user", "content": "hi"}], self.events, self.cancel,
+                         connect=self.connect, complete=complete, problem=problem)
+        else:
+            stream_reply("Fake", key, model, [{"role": "user", "content": "hi"}], self.events, self.cancel,
+                         connect=self.connect, complete=complete, problem=problem, search=search)
         result: list[ReplyEvent] = []
         while not self.events.empty():
             result.append(self.events.get_nowait())
@@ -64,6 +71,12 @@ class StreamReplyTests(unittest.TestCase):
         self.assertEqual(events[-1][0], "complete")
         self.assertEqual(self.keys, [SECRET])
         self.assertTrue(self.clients[0].closed)
+
+    def test_web_search_is_off_unless_asked_for_and_reaches_the_request(self) -> None:
+        _ = self.run_reply()
+        _ = self.run_reply(search=True)
+        _ = self.run_reply(search=False)
+        self.assertEqual(self.searches, [False, True, False])
 
     def test_checks_run_in_order_before_connecting(self) -> None:
         cases: list[tuple[str | None, object, str | None, str]] = [
