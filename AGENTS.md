@@ -38,21 +38,12 @@ Done means all three are clean. Paste the summary line of each as evidence.
 - A new test must fail without the change it covers. Check by stashing or reverting the source change and running it.
 - Each feature covers the unhappy paths: empty, invalid, failure, cancellation, busy/repeat.
 
-## Working with Kevin
-
-Kevin writes the source code himself; the agent guides, tests and reviews.
-
-- **Pointers, not patches.** When Kevin is implementing, give step-by-step pointers: group by file, number the steps, and name each function, argument and value exactly. Keep only what he needs to type the code; leave out background unless he asks. Give pasteable code only when asked.
-- **One consistent version.** When a step changes, restate the whole step as it should now be done, and say plainly what replaced what.
-- **Check against his current state.** Before reviewing or giving the next step, read the working tree (`git status`, `git diff`) and point out what is done, what is wrong and what is left.
-- The agent writes and fixes tests, runs the checks and commits once Kevin's part passes.
-
 ## Git
 
 - Conventional commits, one logical change each. Stage paths by name.
 - No co-author or attribution lines in commit messages.
 - Push only when Kevin asks.
-- Local development notes are gitignored on purpose and never committed: `BACKLOG.md`, `docs/`, `engineering/`, `prompt/`, `ux/`.
+- Local development notes are gitignored on purpose and never committed: `BACKLOG.md`, `CLAUDE.local.md`, `docs/`, `engineering/`, `prompt/`, `ux/`.
 - The repo is a public portfolio and has no license on purpose. Leave it unlicensed.
 
 ## Feature workflow
