@@ -231,4 +231,7 @@ def build_workspace(app: "VinApp") -> None:
         mouse_support=True,
     )
 
+    app.app.ttimeoutlen = 0.05
+    app.app.timeoutlen = 0.05
+
     app.session.app = app.app
