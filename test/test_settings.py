@@ -166,8 +166,8 @@ class SettingsCommandTests(unittest.TestCase):
         self.assertIsNone(asyncio.run(self.app.change_settings()))
 
         self.assertEqual(self.inline.await_args_list, [
-            call("Settings", [("subagents", "Subagents"), ("search", "Web search")]),
-            call("Subagents", [("enabled", "Subagents: on"), ("budget", "Request limit: 8")]),
+            call("Settings", [("subagents", "Subagents           ›"), ("search", "Web search          ›")]),
+            call("Subagents", [("enabled", "Subagents           on"), ("budget", "Request limit       8 ›")]),
         ])
         self.save.assert_not_called()
 
@@ -322,13 +322,13 @@ class SearchSettingsCommandTests(unittest.TestCase):
     def test_menu_shows_the_key_row_only_when_a_key_is_saved(self) -> None:
         self.inline.side_effect = ["search", asyncio.CancelledError()]
         self.assertIsNone(self.settings())
-        self.assertEqual(self.inline.await_args_list[-1], call("Web search", [("enabled", "Web search: off")]))
+        self.assertEqual(self.inline.await_args_list[-1], call("Web search", [("enabled", "Web search          off")]))
 
         self.inline.side_effect = ["search", asyncio.CancelledError()]
         self.app.search_settings = ON
         self.assertIsNone(self.settings())
         rows = cast(list[tuple[str, str]], self.inline.await_args_list[-1].args[1])
-        self.assertEqual(rows, [("enabled", "Web search: on"), ("key", "Key: tvly-dev-•••-key")])
+        self.assertEqual(rows, [("enabled", "Web search          on"), ("key", "Key                 tvly-dev-•••-key ›")])
 
     def test_first_turn_on_asks_for_the_key_checks_it_and_saves_it_on(self) -> None:
         self.inline.side_effect = ["search", "enabled"]

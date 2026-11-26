@@ -125,7 +125,7 @@ def create_choice_menu(
         values=options,
         default=default,
         select_on_focus=True,
-        show_numbers=True,
+        show_numbers=False,
         open_character="",
         select_character="❯",
         close_character="",
@@ -133,7 +133,7 @@ def create_choice_menu(
         show_scrollbar=False,
         container_style="class:completion-menu.completion",
         default_style="",
-        selected_style="fg:#ffffff bg:#303b59 bold",
+        selected_style="fg:#8fa8ff bold",
         checked_style="class:completion-menu.completion.current",
         number_style="",
     )
@@ -147,6 +147,10 @@ def create_choice_menu(
     )
 
     return choices, container
+
+
+def setting_row(label: str, value: str) -> str:
+    return f"{label:<20}{value}"
 
 
 def choose_login_method() -> str:
@@ -1510,8 +1514,14 @@ class VinApp:
     async def change_subagent_settings(self) -> str | None:
         settings = self.subagent_settings
         rows: list[tuple[str, str]] = [
-            ("enabled", f"Subagents: {'on' if settings['enabled'] else 'off'}"),
-            ("budget", f"Request limit: {settings['budget']}"),
+            (
+                "enabled",
+                setting_row("Subagents", "on" if settings["enabled"] else "off"),
+            ),
+            (
+                "budget",
+                setting_row("Request limit", f"{settings['budget']} ›"),
+            ),
         ]
         try:
             choice = await self.choose_inline("Subagents", rows)
@@ -1546,10 +1556,10 @@ class VinApp:
         current = self.search_settings
         on = current is not None and current["enabled"]
         rows: list[tuple[str, str]] = [
-            ("enabled", f"Web search: {'on' if on else 'off'}"),
+            ("enabled", setting_row("Web search", "on" if on else "off")),
         ]
         if current is not None:
-            rows.append(("key", f"Key: {mask_key(current['key'])}"))
+            rows.append(("key", setting_row("Key", f"{mask_key(current['key'])} ›")))
         try:
             choice = await self.choose_inline("Web search", rows)
         except asyncio.CancelledError:
@@ -1563,7 +1573,11 @@ class VinApp:
     async def change_settings(self) -> str | None:
         try:
             choice = await self.choose_inline(
-                "Settings", [("subagents", "Subagents"), ("search", "Web search")]
+                "Settings",
+                [
+                    ("subagents", setting_row("Subagents", "›")),
+                    ("search", setting_row("Web search", "›")),
+                ],
             )
         except asyncio.CancelledError:
             if _task_is_cancelling():
