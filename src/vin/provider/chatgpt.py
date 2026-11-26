@@ -13,7 +13,7 @@ from typing import (
     runtime_checkable,
 )
 
-from vin.agent import AgentError, run_reply
+from vin.agent import CONTEXT_FULL, AgentError, context_too_long, run_reply
 from vin.provider.prompts import instructions
 from vin.types import History, ModelMetadata, is_record, is_list, json_value
 from vin.provider.events import (
@@ -251,6 +251,8 @@ def _error_message(
     if isinstance(error, openai.APITimeoutError):
         return ("error", "ChatGPT request timed out. Please try again.")
     if isinstance(error, openai.APIStatusError):
+        if error.status_code in (400, 413) and context_too_long(error):
+            return ("error", CONTEXT_FULL)
         message = f"ChatGPT request failed (HTTP {error.status_code})."
         for label, value in (("code", error.code), ("param", error.param)):
             if (

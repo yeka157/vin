@@ -493,6 +493,17 @@ class StreamingResponseTests(unittest.TestCase):
         self.assertEqual(result[1][0], "error")
         self.assertNotIn("fake-access-token", str(result))
 
+    def test_a_too_long_conversation_says_how_to_recover(self) -> None:
+        request = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+        self.client.responses.create.side_effect = openai.APIStatusError(
+            "Your input exceeds the context window of this model.",
+            response=httpx2.Response(400, request=request),
+            body={"message": "Your input exceeds the context window of this model.",
+                  "code": "context_length_exceeded", "param": "input"},
+        )
+        self.invoke()
+        self.assertEqual(self.drain()[-1], ("error", agent.CONTEXT_FULL))
+
     def test_api_diagnostics_hide_credentials_in_code_and_parameter_fields(self) -> None:
         request = httpx2.Request("POST", "https://api.openai.com/v1/responses")
         for code, param in (("fake-access-token", "reasoning.effort"),

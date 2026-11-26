@@ -107,6 +107,18 @@ SKIPPED_CALL = (
 )
 BUDGET_USED = "Not run: the tool budget for this turn is used up."
 FINAL_REQUEST_NOTE = "The tool budget for this turn is used up. Do not call tools. Summarize what you did, what you verified, and what remains."
+CONTEXT_FULL = "The conversation is too long for this model. Use /compact to summarize it, or /clear to start fresh."
+
+
+def context_too_long(error: object) -> bool:
+    code = cast(object, getattr(error, "code", None))
+    message = cast(object, getattr(error, "message", ""))
+    text = message.lower() if isinstance(message, str) else ""
+    return (
+        code == "context_length_exceeded"
+        or "context length" in text
+        or "context_length" in text
+    )
 
 
 def close_open_calls(history: History) -> History:

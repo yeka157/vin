@@ -4,7 +4,7 @@ from queue import SimpleQueue
 from threading import Event
 
 from urllib.error import HTTPError, URLError
-from vin.agent import AgentError, run_reply
+from vin.agent import CONTEXT_FULL, AgentError, context_too_long, run_reply
 from vin.auth.credentials import save_private_json
 from vin.provider.events import EventSender, ReplyEvent, make_senders
 from vin.provider.model_cache import parse_models
@@ -191,6 +191,8 @@ def _error_message(error: Exception) -> tuple[Literal["error", "rate_limit"], st
     if isinstance(error, openai.APITimeoutError):
         return ("error", "OpenRouter request timed out. Please try again.")
     if isinstance(error, openai.APIStatusError):
+        if error.status_code in (400, 413) and context_too_long(error):
+            return ("error", CONTEXT_FULL)
         if error.status_code == 401:
             return (
                 "error",

@@ -18,6 +18,8 @@ from aisuite.utils.tools import Tools
 import httpx2
 import openai
 
+from vin import agent
+
 from vin.provider import prompts
 from vin.provider.events import ReplyEvent, ReplyEvents
 from vin.provider.openrouter import stream_openrouter_response, to_chat_messages
@@ -264,6 +266,22 @@ class OpenRouterStreamTests(unittest.TestCase):
                 self.assertEqual(events, [(kind, message)])
                 self.assertEqual(len(self.bodies), attempts)
                 self.assertEqual(len(self.sleeps), attempts - 1)
+
+    def test_a_too_long_conversation_says_how_to_recover(self) -> None:
+        too_long = ("This endpoint's maximum context length is 131072 tokens. "
+                    "However, you requested about 150000 tokens.")
+        cases: list[Fixture] = [
+            (400, {"error": {"code": 400, "message": too_long}}),
+            (413, {"error": {"code": 413, "message": "Prompt exceeds the context length of this model"}}),
+        ]
+        for failure in cases:
+            with self.subTest(failure=failure):
+                self.setUp()
+                self.assertEqual(self.run_stream([failure]), [("error", agent.CONTEXT_FULL)])
+
+    def test_a_plain_bad_request_keeps_the_generic_message(self) -> None:
+        events = self.run_stream([(400, {"error": {"code": 400, "message": "Invalid tool schema"}})])
+        self.assertEqual(events, [("error", "OpenRouter request failed (HTTP 400).")])
 
     def test_a_transient_failure_is_retried_and_the_turn_completes(self) -> None:
         failures: list[Fixture] = [
