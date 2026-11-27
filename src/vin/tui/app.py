@@ -228,7 +228,7 @@ class VinApp:
             self, title, models, multi=multi, action=action, current=current, search=search
         )
 
-    async def change_model(self) -> str | None:
+    async def change_model(self) -> str | Text | None:
         return await model_menu.change_model(self)
 
     async def add_openrouter_model(self, query: str) -> str | None:

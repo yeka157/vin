@@ -14,6 +14,9 @@ from urllib.error import HTTPError, URLError
 from prompt_toolkit.completion import CompleteEvent, WordCompleter
 from prompt_toolkit.document import Document
 
+from rich.text import Text
+
+from vin.auth.chatgpt import TokenExchangeError
 from vin.provider import openrouter
 from vin.tui import app as app_module
 from vin.tui import model_menu as model_menu_module
@@ -205,6 +208,37 @@ class ModelCommandMethodTests(unittest.IsolatedAsyncioTestCase):
         discover.assert_not_awaited()
         self.assertEqual(self.pick.await_args_list[0].args[1], [CODER])
         self.assertEqual(self.pick.await_args_list[0].kwargs["current"], ("", ""))
+
+    async def test_failed_chatgpt_sign_in_still_lists_the_openrouter_models(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.vin.models = [CODER]
+        self.vin.selected_provider, self.vin.selected_model = None, None
+        failure = TokenExchangeError(401, "invalid_grant")
+        for picked, expected in (
+            ([CODER], f"ChatGPT models are unavailable: {failure}\nModel: OpenRouter · Acme: Coder"),
+            (None, f"ChatGPT models are unavailable: {failure}"),
+        ):
+            with self.subTest(picked=picked):
+                self.pick.reset_mock()
+                self.pick.return_value = picked
+                with patch.object(self.vin, "discover_chatgpt_models", AsyncMock(side_effect=failure)):
+                    outcome = await self.vin.change_model()
+                assert isinstance(outcome, Text)
+                self.assertEqual(str(outcome), expected)
+                self.assertIn("red", [outcome.style, *(span.style for span in outcome.spans)])
+                self.assertEqual(self.pick.await_args_list[0].args[1], [CODER])
+                self.assertFalse(self.vin.loading_model)
+        self.assert_selection("openrouter", "acme/coder")
+
+    async def test_failed_chatgpt_discovery_with_no_other_models_is_an_error(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.vin.openrouter = None
+        self.vin.models = []
+        with patch.object(self.vin, "discover_chatgpt_models", AsyncMock(side_effect=RuntimeError("offline"))):
+            with self.assertRaisesRegex(RuntimeError, "offline"):
+                await self.vin.change_model()
+        self.pick.assert_not_awaited()
+        self.assertFalse(self.vin.loading_model)
 
     async def test_openrouter_with_an_empty_list_points_to_add(self) -> None:
         self.vin.models = []

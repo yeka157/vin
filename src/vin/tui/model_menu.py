@@ -137,15 +137,23 @@ async def pick_models(owner: "VinApp",
         owner.app.invalidate()
 
 
-async def change_model(owner: "VinApp") -> str | None:
+async def change_model(owner: "VinApp") -> str | Text | None:
     chatgpt = bool(owner.credentials and owner.credentials.get("access_token"))
     if not chatgpt and owner.openrouter is None:
         return "Sign in with /login before choosing a model."
+    unavailable: str | None = None
     if chatgpt and not any(model["provider"] == "chatgpt" for model in owner.models):
-        models = await owner.wait_for_models(owner.discover_chatgpt_models())
-        if models is None:
-            return None
-        owner.set_models("chatgpt", models)
+        try:
+            models = await owner.wait_for_models(owner.discover_chatgpt_models())
+        except (RuntimeError, OSError, ValueError) as error:
+            # A failed ChatGPT sign-in must not hide the OpenRouter models.
+            if not owner.models:
+                raise
+            unavailable = f"ChatGPT models are unavailable: {error}"
+        else:
+            if models is None:
+                return None
+            owner.set_models("chatgpt", models)
     if not owner.models:
         return "No models yet. Use /model add to add an OpenRouter model."
     picked = await owner.pick_models(
@@ -155,15 +163,18 @@ async def change_model(owner: "VinApp") -> str | None:
         action="choose",
         current=(owner.selected_provider or "", owner.selected_model or ""),
     )
-    if not picked:
-        return None
-    chosen = picked[0]
-    if (
-        chosen["provider"] == owner.selected_provider
-        and chosen["slug"] == owner.selected_model
-    ):
-        return None
-    return owner.select_model(chosen)
+    chosen = picked[0] if picked else None
+    outcome = (
+        None
+        if chosen is None
+        or (chosen["provider"], chosen["slug"])
+        == (owner.selected_provider, owner.selected_model)
+        else owner.select_model(chosen)
+    )
+    if unavailable is None:
+        return outcome
+    warning = Text(unavailable, style="red")
+    return warning if outcome is None else Text("\n").join([warning, Text(outcome)])
 
 
 async def add_openrouter_model(owner: "VinApp", query: str) -> str | None:
