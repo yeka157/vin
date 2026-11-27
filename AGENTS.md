@@ -9,6 +9,7 @@ Vin is a terminal coding agent in Python: a prompt-toolkit/Rich TUI, ChatGPT sig
 - `src/vin/provider/chatgpt.py` and `src/vin/provider/openrouter.py`: the provider-specific parts: the wire format (Responses or Chat Completions), sign-in details and the model list.
 - `src/vin/provider/events.py`: the event queue between the worker thread and the UI.
 - `src/vin/tools.py`: the four tools and `TOOL_REGISTRY`.
+- `src/vin/settings.py`: everything `/settings` changes, saved in one flat `settings.json`. Secrets keep their own files (`auth/`).
 - `src/vin/types/`: every named type (TypedDicts, `type` aliases, Protocols), one module per area: `data` (JSON values and guards), `history`, `models`, `auth`, `transcript`, `sessions`, `settings`, `events`, `agent` (the provider contract), `chatgpt` (the Responses client shape). Import from the owning module; `vin.types` itself exports nothing. A new type goes in the module for its area, or a new module when it starts a new area. These modules import only the standard library, Rich and each other, so anything can use them without an import cycle.
 - `src/vin/tui/`: the app (`app.py` holds `VinApp`, `stream_reply` and the command receiver), key bindings, layout and transcript rendering.
 - `src/vin/sessions/`: saving and resuming conversations.

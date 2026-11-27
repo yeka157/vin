@@ -24,6 +24,7 @@ from rich.text import Text
 
 from tui_typing_helpers import key_event
 from vin.provider.events import ReplyEvents
+from vin.settings import DEFAULT_SETTINGS
 from vin.types.events import ReplyEvent, ToolStarted
 from vin.sessions import storage
 from vin.sessions.records import new_session
@@ -154,19 +155,21 @@ class SubagentTranscriptTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(compaction, return_exceptions=True)
 
     async def test_a_turn_passes_the_saved_subagent_settings(self) -> None:
-        self.owner.subagent_settings = {"enabled": False, "budget": 3, "fetch": True}
+        self.owner.settings = {**DEFAULT_SETTINGS, "subagents": False, "subagent_budget": 3}
         await self.start_turn()
 
         options = cast(dict[str, object], self.stream.call_args.kwargs)
         self.assertEqual((options["subagents"], options["subagent_budget"]), (False, 3))
 
     async def test_a_turn_passes_web_search_on_when_it_is_on(self) -> None:
-        self.owner.search_settings = {"key": "tvly-key", "enabled": True}
+        self.owner.search_key = "tvly-key"
+        self.owner.settings = {**DEFAULT_SETTINGS, "search": True}
         await self.start_turn()
         self.assertIs(cast(dict[str, object], self.stream.call_args.kwargs)["search"], True)
 
     async def test_a_turn_passes_web_search_off_when_it_is_off(self) -> None:
-        self.owner.search_settings = {"key": "tvly-key", "enabled": False}
+        self.owner.search_key = "tvly-key"
+        self.owner.settings = {**DEFAULT_SETTINGS, "search": False}
         await self.start_turn()
         self.assertIs(cast(dict[str, object], self.stream.call_args.kwargs)["search"], False)
 
@@ -175,12 +178,13 @@ class SubagentTranscriptTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(cast(dict[str, object], self.stream.call_args.kwargs)["fetch"], True)
 
     async def test_a_turn_passes_web_fetch_off_when_it_is_off(self) -> None:
-        self.owner.subagent_settings = {"enabled": True, "budget": 8, "fetch": False}
+        self.owner.settings = {**DEFAULT_SETTINGS, "fetch": False}
         await self.start_turn()
         self.assertIs(cast(dict[str, object], self.stream.call_args.kwargs)["fetch"], False)
 
     async def test_a_turn_passes_web_search_off_without_a_key(self) -> None:
-        self.owner.search_settings = None
+        self.owner.search_key = None
+        self.owner.settings = {**DEFAULT_SETTINGS, "search": True}
         await self.start_turn()
         self.assertIs(cast(dict[str, object], self.stream.call_args.kwargs)["search"], False)
 

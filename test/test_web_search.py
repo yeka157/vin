@@ -252,7 +252,7 @@ class SearchKeyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Could not read the saved web search key"):
             _ = search.load_search_key()
 
-        for content in ([KEY], {}, {"key": ""}, {"key": "   ", "enabled": True}, {"key": 5, "enabled": True}, {"key": KEY}):
+        for content in ([KEY], {}, {"key": ""}, {"key": "   ", "enabled": True}, {"key": 5, "enabled": True}):
             with self.subTest(content=content):
                 _ = self.path.write_text(json.dumps(content), encoding="utf-8")
                 with self.assertRaisesRegex(RuntimeError, "Saved web search key is invalid"):

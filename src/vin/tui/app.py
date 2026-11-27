@@ -7,7 +7,7 @@ from threading import Event, Thread
 from time import monotonic
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Unpack
 from collections.abc import Coroutine, Sequence
 
 from prompt_toolkit import Application, PromptSession
@@ -49,9 +49,9 @@ from vin.auth.openrouter import (
 )
 from vin.auth.search import (
     check_search_key,
-    delete_search_settings,
-    load_search_settings,
-    save_search_settings,
+    delete_search_key,
+    load_search_key,
+    save_search_key,
 )
 from vin.provider.chatgpt import list_chatgpt_models, stream_chatgpt_response
 from vin.provider.openrouter import (
@@ -64,14 +64,9 @@ from vin.provider.model_cache import (
     load_cached_chatgpt_models,
     save_cached_chatgpt_models,
 )
-from vin.provider.preferences import (
-    DEFAULT_SUBAGENT_SETTINGS,
-    load_model_preference,
-    load_subagent_settings,
-    save_model_preference,
-    save_subagent_settings,
-)
+from vin.provider.preferences import load_model_preference, save_model_preference
 from vin.sessions.records import new_session
+from vin.settings import DEFAULT_SETTINGS, load_settings, save_settings
 from vin.tools import LAUNCH_DIR
 from vin.tui import conversations
 from vin.tui.constants import PROVIDER_LABELS, is_command
@@ -85,7 +80,7 @@ from vin.types.auth import AccountRecord, Credentials, OpenRouterAccount, Regist
 from vin.types.history import History
 from vin.types.models import Provider, ModelMetadata, ModelPreference
 from vin.types.sessions import ActiveTurn, SessionRecord
-from vin.types.settings import ReplyOptions, SearchSettings, SubagentSettings
+from vin.types.settings import ReplyOptions, Settings, SettingsChange
 from vin.types.transcript import AssistantEntry, Subagent, ToolEntry, TranscriptEntry
 
 
@@ -262,12 +257,12 @@ class VinApp:
         self.viewed: str | None = None
         self.panel_start = 0
         self.panel_index: int | None = None
-        self.subagent_settings: SubagentSettings = DEFAULT_SUBAGENT_SETTINGS.copy()
+        self.settings: Settings = DEFAULT_SETTINGS.copy()
         self.openrouter: OpenRouterAccount | None = None
         self.secret_future: asyncio.Future[str] | None = None
         self.picker: ModelPicker | None = None
         self.exit_armed_until = 0.0
-        self.search_settings: SearchSettings | None = None
+        self.search_key: str | None = None
 
     async def ask_secret(self, message: str) -> str:
         if self.choice_future is not None or self.secret_future is not None:
@@ -317,22 +312,29 @@ class VinApp:
             self.loading_model = was_loading
             self.app.invalidate()
 
+    def update_settings(self, **changes: Unpack[SettingsChange]) -> Settings:
+        updated: Settings = {**self.settings, **changes}
+        save_settings(updated)
+        self.settings = updated
+        return updated
+
+    def search_on(self) -> bool:
+        return self.settings["search"] and self.search_key is not None
+
     async def toggle_search(self) -> str | None:
-        current = self.search_settings
-        if current is None:
+        if self.search_key is None:
             key = await self.ask_search_key()
             if key is None:
                 return None
-            updated: SearchSettings = {"key": key, "enabled": True}
+            save_search_key(key)
+            self.search_key = key
+            updated = self.update_settings(search=True)
         else:
-            updated = {"key": current["key"], "enabled": not current["enabled"]}
-        save_search_settings(updated)
-        self.search_settings = updated
-        return f"Web search {'on' if updated['enabled'] else 'off'}"
+            updated = self.update_settings(search=not self.settings["search"])
+        return f"Web search {'on' if updated['search'] else 'off'}"
 
     async def change_search_key(self) -> str | None:
-        current = self.search_settings
-        if current is None:
+        if self.search_key is None:
             return None
         try:
             choice = await self.choose_inline(
@@ -343,17 +345,16 @@ class VinApp:
                 raise
             return None
         if choice == "remove":
-            delete_search_settings()
-            self.search_settings = None
+            delete_search_key()
+            self.search_key = None
+            _ = self.update_settings(search=False)
             return "Web search key removed · web search off"
-        else:
-            key = await self.ask_search_key()
-            if key is None:
-                return None
-            updated: SearchSettings = {"key": key, "enabled": current["enabled"]}
-            save_search_settings(updated)
-            self.search_settings = updated
-            return f"Web search key replaced · {mask_key(key)}"
+        key = await self.ask_search_key()
+        if key is None:
+            return None
+        save_search_key(key)
+        self.search_key = key
+        return f"Web search key replaced · {mask_key(key)}"
 
     async def sign_in_openrouter(self) -> None:
         try:
@@ -610,12 +611,10 @@ class VinApp:
                 options["compact_only"] = True
 
             if not compact_only:
-                options["fetch"] = self.subagent_settings["fetch"]
-                options["subagents"] = self.subagent_settings["enabled"]
-                options["search"] = (
-                    self.search_settings is not None and self.search_settings["enabled"]
-                )
-                options["subagent_budget"] = self.subagent_settings["budget"]
+                options["subagents"] = self.settings["subagents"]
+                options["subagent_budget"] = self.settings["subagent_budget"]
+                options["search"] = self.search_on()
+                options["fetch"] = self.settings["fetch"]
 
             Thread(
                 target=(
@@ -1373,13 +1372,13 @@ class VinApp:
     async def initialize_session(self, *, sign_in: bool = False) -> None:
         if not sign_in:
             try:
-                self.subagent_settings = load_subagent_settings()
+                self.settings = load_settings()
             except RuntimeError as error:
                 self.transcript.append(
                     {"role": "notice", "content": Text(str(error), style="red")}
                 )
             try:
-                self.search_settings = load_search_settings()
+                self.search_key = load_search_key()
             except RuntimeError as error:
                 self.transcript.append(
                     {"role": "notice", "content": Text(str(error), style="red")}
@@ -1494,24 +1493,19 @@ class VinApp:
         self.run_conversation()
 
     async def toggle_fetch(self) -> str:
-        updated: SubagentSettings = {
-            **self.subagent_settings,
-            "fetch": not self.subagent_settings["fetch"],
-        }
-        save_subagent_settings(updated)
-        self.subagent_settings = updated
+        updated = self.update_settings(fetch=not self.settings["fetch"])
         return f"Web fetch {'on' if updated['fetch'] else 'off'}"
 
     async def change_subagent_settings(self) -> str | None:
-        settings = self.subagent_settings
+        settings = self.settings
         rows: list[tuple[str, str]] = [
             (
                 "enabled",
-                setting_row("Subagents", "on" if settings["enabled"] else "off"),
+                setting_row("Subagents", "on" if settings["subagents"] else "off"),
             ),
             (
                 "budget",
-                setting_row("Request limit", f"{settings['budget']} ›"),
+                setting_row("Request limit", f"{settings['subagent_budget']} ›"),
             ),
         ]
         try:
@@ -1521,41 +1515,28 @@ class VinApp:
                 raise
             return None
         if choice == "enabled":
-            updated: SubagentSettings = {
-                "enabled": not settings["enabled"],
-                "budget": settings["budget"],
-                "fetch": settings["fetch"],
-            }
+            updated = self.update_settings(subagents=not settings["subagents"])
         else:
             try:
                 value = await self.choose_inline(
                     "Subagent request limit",
                     [(str(number), str(number)) for number in range(1, 33)],
-                    default=str(settings["budget"]),
+                    default=str(settings["subagent_budget"]),
                 )
             except asyncio.CancelledError:
                 if _task_is_cancelling():
                     raise
                 return None
 
-            updated = {
-                "enabled": settings["enabled"],
-                "budget": int(value),
-                "fetch": settings["fetch"],
-            }
-
-        save_subagent_settings(updated)
-        self.subagent_settings = updated
-        return f"Subagents {'on' if updated['enabled'] else 'off'} · request limit {updated['budget']}"
+            updated = self.update_settings(subagent_budget=int(value))
+        return f"Subagents {'on' if updated['subagents'] else 'off'} · request limit {updated['subagent_budget']}"
 
     async def change_web_search_settings(self) -> str | None:
-        current = self.search_settings
-        on = current is not None and current["enabled"]
         rows: list[tuple[str, str]] = [
-            ("enabled", setting_row("Web search", "on" if on else "off")),
+            ("enabled", setting_row("Web search", "on" if self.search_on() else "off")),
         ]
-        if current is not None:
-            rows.append(("key", setting_row("Key", f"{mask_key(current['key'])} ›")))
+        if self.search_key is not None:
+            rows.append(("key", setting_row("Key", f"{mask_key(self.search_key)} ›")))
         try:
             choice = await self.choose_inline("Web search", rows)
         except asyncio.CancelledError:
@@ -1577,7 +1558,7 @@ class VinApp:
                         "fetch",
                         setting_row(
                             "Web fetch",
-                            "on" if self.subagent_settings["fetch"] else "off",
+                            "on" if self.settings["fetch"] else "off",
                         ),
                     ),
                 ],

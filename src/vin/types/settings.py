@@ -3,15 +3,18 @@
 from typing import TypedDict
 
 
-class SubagentSettings(TypedDict):
-    enabled: bool
-    budget: int
+class Settings(TypedDict):
+    subagents: bool
+    subagent_budget: int
+    search: bool
     fetch: bool
 
 
-class SearchSettings(TypedDict):
-    key: str
-    enabled: bool
+class SettingsChange(TypedDict, total=False):
+    subagents: bool
+    subagent_budget: int
+    search: bool
+    fetch: bool
 
 
 class ReplyOptions(TypedDict, total=False):

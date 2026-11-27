@@ -7,44 +7,50 @@ from urllib.request import Request, urlopen
 
 from vin.auth.credentials import save_private_json
 from vin.types.data import is_record
-from vin.types.settings import SearchSettings
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 SEARCH_KEY_PATH = Path.home() / ".config" / "vin" / "search.json"
 
 
-def load_search_key() -> str | None:
-    settings = load_search_settings()
-    return settings["key"] if settings is not None else None
-
-
-def load_search_settings() -> SearchSettings | None:
+def _read_saved_key_file() -> dict[str, object] | None:
     try:
-        account = cast(object, json.loads(SEARCH_KEY_PATH.read_text(encoding="utf-8")))
+        saved = cast(object, json.loads(SEARCH_KEY_PATH.read_text(encoding="utf-8")))
     except FileNotFoundError:
         return None
     except OSError, ValueError:
         raise RuntimeError("Could not read the saved web search key.") from None
-
-    if not is_record(account):
+    if not is_record(saved):
         raise RuntimeError("Saved web search key is invalid.")
-    key = account.get("key")
+    return saved
+
+
+def load_search_key() -> str | None:
+    saved = _read_saved_key_file()
+    if saved is None:
+        return None
+    key = saved.get("key")
     if not isinstance(key, str) or not key.strip():
         raise RuntimeError("Saved web search key is invalid.")
-    enabled = account.get("enabled")
-    if type(enabled) is not bool:
-        raise RuntimeError("Saved web search key is invalid.")
-    return {"key": key.strip(), "enabled": enabled}
+    return key.strip()
 
 
-def save_search_settings(settings: SearchSettings) -> Path:
+def saved_search_enabled() -> bool:
+    """Whether web search was on when an older Vin kept that flag next to the key."""
     try:
-        return save_private_json(SEARCH_KEY_PATH, dict(settings))
+        saved = _read_saved_key_file()
+    except RuntimeError:
+        return False
+    return saved is not None and saved.get("enabled") is True
+
+
+def save_search_key(key: str) -> Path:
+    try:
+        return save_private_json(SEARCH_KEY_PATH, {"key": key})
     except OSError, RuntimeError:
         raise RuntimeError("Could not save the web search key.") from None
 
 
-def delete_search_settings() -> None:
+def delete_search_key() -> None:
     try:
         SEARCH_KEY_PATH.unlink(missing_ok=True)
     except OSError:

@@ -27,6 +27,7 @@ from prompt_toolkit.output import DummyOutput
 from rich.text import Text
 
 from vin.auth import openrouter
+from vin.settings import DEFAULT_SETTINGS
 from vin.tui import app as app_module
 from vin.tui.app import VinApp, get_chatgpt_model_preference
 from vin.tui.bindings import create_bindings
@@ -443,7 +444,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
             app_module, load_openrouter_account=self.account, load_model_preference=self.preference,
             load_active_session=self.session, load_cached_chatgpt_models=Mock(return_value=[CHATGPT_MODEL]),
             load_openrouter_whitelist=Mock(return_value=[OPENROUTER_MODEL]),
-            load_subagent_settings=Mock(return_value={"enabled": True, "budget": 8, "fetch": True})))
+            load_search_key=Mock(return_value=None), load_settings=Mock(side_effect=lambda: DEFAULT_SETTINGS.copy())))
 
     async def test_saved_key_and_openrouter_choice_start_on_openrouter(self) -> None:
         await self.vin.initialize_session()
