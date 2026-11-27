@@ -190,6 +190,14 @@ class SettingsFileTests(unittest.TestCase):
         self.assertEqual(self.destination.read_bytes(), original)
 
 
+ESC = asyncio.CancelledError()
+TOP = [("subagents", "Subagents           ›"), ("search", "Web search          ›")]
+
+
+def top(fetch: str = "on") -> list[tuple[str, str]]:
+    return [*TOP, ("fetch", f"Web fetch           {fetch}")]
+
+
 class SettingsCommandTests(unittest.TestCase):
     def setUp(self) -> None:
         self.app = VinApp()
@@ -198,75 +206,83 @@ class SettingsCommandTests(unittest.TestCase):
         self.enterContext(patch.object(self.app, "choose_inline", self.inline))
         self.enterContext(patch.object(settings_menu_module, "save_settings", self.save))
 
-    def test_settings_opens_a_menu_per_topic(self) -> None:
-        self.inline.side_effect = ["subagents", asyncio.CancelledError()]
-
+    def run_menu(self, *steps: object) -> None:
+        self.inline.side_effect = list(steps)
         self.assertIsNone(asyncio.run(self.app.change_settings()))
+        self.assertEqual(self.inline.await_count, len(steps), "every step should be a menu the user saw")
+
+    def test_settings_opens_a_menu_per_topic_and_esc_steps_back(self) -> None:
+        self.run_menu("subagents", ESC, ESC)
 
         self.assertEqual(self.inline.await_args_list, [
-            call("Settings", [("subagents", "Subagents           ›"), ("search", "Web search          ›"),
-                              ("fetch", "Web fetch           on")]),
-            call("Subagents", [("enabled", "Subagents           on"), ("budget", "Request limit       8 ›")]),
+            call("Settings", top(), default="subagents"),
+            call("Subagents", [("enabled", "Subagents           on"), ("budget", "Request limit       8 ›")],
+                 default="enabled"),
+            call("Settings", top(), default="subagents"),
         ])
         self.save.assert_not_called()
 
-    def test_menu_shows_current_values_and_toggles_subagents(self) -> None:
-        self.inline.side_effect = ["subagents", "enabled"]
+    def test_a_change_stays_in_the_menu_showing_the_new_value(self) -> None:
+        self.run_menu("subagents", "enabled", "enabled", ESC, ESC)
 
-        self.assertEqual(asyncio.run(self.app.change_settings()), "Subagents off · request limit 8")
-
-        self.save.assert_called_once_with(changed(subagents=False))
-        self.assertEqual(self.app.settings, changed(subagents=False))
-
-    def test_web_fetch_row_toggles_and_saves_without_touching_subagents(self) -> None:
-        self.inline.side_effect = ["fetch"]
-        self.assertEqual(asyncio.run(self.app.change_settings()), "Web fetch off")
-        self.save.assert_called_once_with(changed(fetch=False))
-        self.assertEqual(self.app.settings, changed(fetch=False))
-
-        self.inline.reset_mock()
-        self.inline.side_effect = ["fetch"]
-        self.assertEqual(asyncio.run(self.app.change_settings()), "Web fetch on")
-        self.assertEqual(self.inline.await_args_list[0].args[1][2], ("fetch", "Web fetch           off"))
+        menus = [args.args[1] for args in self.inline.await_args_list]
+        self.assertEqual(menus[2][0], ("enabled", "Subagents           off"))
+        self.assertEqual(menus[3][0], ("enabled", "Subagents           on"))
+        self.assertEqual(self.save.call_args_list, [call(changed(subagents=False)), call(DEFAULTS)])
         self.assertEqual(self.app.settings, DEFAULTS)
+
+    def test_web_fetch_row_toggles_in_place_without_touching_subagents(self) -> None:
+        self.run_menu("fetch", "fetch", ESC)
+
+        self.assertEqual([args.args[1] for args in self.inline.await_args_list], [top(), top("off"), top()])
+        self.assertEqual([args.kwargs["default"] for args in self.inline.await_args_list],
+                         ["subagents", "fetch", "fetch"])
+        self.assertEqual(self.save.call_args_list, [call(changed(fetch=False)), call(DEFAULTS)])
 
     def test_changing_subagents_keeps_the_other_settings(self) -> None:
         start = changed(fetch=False, search=True)
-        for side_effect, expected in ((["subagents", "enabled"], {**start, "subagents": False}),
-                                      (["subagents", "budget", "5"], {**start, "subagent_budget": 5})):
-            with self.subTest(side_effect=side_effect):
+        for steps, expected in ((["subagents", "enabled", ESC, ESC], {**start, "subagents": False}),
+                                (["subagents", "budget", "5", ESC, ESC], {**start, "subagent_budget": 5})):
+            with self.subTest(steps=steps):
                 self.app.settings = start
-                self.inline.side_effect = side_effect
-                _ = asyncio.run(self.app.change_settings())
+                self.inline.reset_mock()
+                self.run_menu(*steps)
                 self.assertEqual(self.app.settings, expected)
 
-    def test_failed_web_fetch_save_keeps_it_on(self) -> None:
-        self.inline.side_effect = ["fetch"]
-        self.save.side_effect = RuntimeError("Could not save settings.")
-        with self.assertRaisesRegex(RuntimeError, "Could not save settings."):
-            asyncio.run(self.app.change_settings())
-        self.assertTrue(self.app.settings["fetch"])
-
     def test_request_limit_is_picked_from_one_to_thirty_two(self) -> None:
-        self.inline.side_effect = ["subagents", "budget", "3"]
-
-        self.assertEqual(asyncio.run(self.app.change_settings()), "Subagents on · request limit 3")
+        self.run_menu("subagents", "budget", "3", ESC, ESC)
 
         self.assertEqual(self.inline.await_args_list[2], call(
             "Subagent request limit", [(str(number), str(number)) for number in range(1, 33)], default="8"))
+        self.assertEqual(self.inline.await_args_list[3].args[1][1], ("budget", "Request limit       3 ›"))
+        self.assertEqual(self.inline.await_args_list[3].kwargs["default"], "budget")
         self.assertEqual(self.app.settings, changed(subagent_budget=3))
 
-    def test_escape_in_either_picker_changes_nothing(self) -> None:
-        for side_effect in ([asyncio.CancelledError()], ["subagents", asyncio.CancelledError()],
-                            ["subagents", "budget", asyncio.CancelledError()]):
-            with self.subTest(side_effect=side_effect):
+    def test_escape_anywhere_changes_nothing(self) -> None:
+        for steps in ([ESC], ["subagents", ESC, ESC], ["subagents", "budget", ESC, ESC, ESC]):
+            with self.subTest(steps=steps):
                 self.inline.reset_mock()
-                self.inline.side_effect = side_effect
-                self.assertIsNone(asyncio.run(self.app.change_settings()))
+                self.run_menu(*steps)
                 self.save.assert_not_called()
                 self.assertEqual(self.app.settings, DEFAULTS)
 
-    def test_failed_save_keeps_the_current_settings(self) -> None:
+    def test_ctrl_c_while_a_menu_is_open_is_not_swallowed(self) -> None:
+        async def main() -> None:
+            async def wait(*_args: object, **_kwargs: object) -> str:
+                await asyncio.sleep(10)
+                return "fetch"
+
+            self.inline.side_effect = wait
+            task = asyncio.create_task(self.app.change_settings())
+            await asyncio.sleep(0)
+            _ = task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(main())
+        self.save.assert_not_called()
+
+    def test_failed_save_keeps_the_current_settings_and_leaves_the_menu(self) -> None:
         self.inline.side_effect = ["subagents", "enabled"]
         self.save.side_effect = RuntimeError("Could not save settings.")
 
@@ -277,9 +293,9 @@ class SettingsCommandTests(unittest.TestCase):
     def test_bad_settings_file_shows_a_notice_and_keeps_defaults(self) -> None:
         self.app.credentials = fixture_credentials("token")
         with patch_app(create=True,
-                            load_settings=Mock(side_effect=RuntimeError("Saved settings are invalid.")),
-                            load_model_preference=Mock(return_value={"provider": "chatgpt", "model": "m"}),
-                            load_cached_chatgpt_models=Mock(return_value=[])):
+                       load_settings=Mock(side_effect=RuntimeError("Saved settings are invalid.")),
+                       load_model_preference=Mock(return_value={"provider": "chatgpt", "model": "m"}),
+                       load_cached_chatgpt_models=Mock(return_value=[])):
             asyncio.run(self.app.initialize_session())
 
         entry, = self.app.transcript
@@ -375,42 +391,43 @@ class SearchSettingsCommandTests(unittest.TestCase):
         self.enterContext(patch.object(self.app, "choose_inline", self.inline))
         self.enterContext(patch.object(self.app, "ask_secret", self.secret))
         self.enterContext(patch.object(self.app, "app", Mock(), create=True))
-        self.enterContext(patch_app(check_search_key=self.check,
+        self.enterContext(patch.multiple(settings_menu_module, check_search_key=self.check,
                                          save_search_key=self.save_key,
                                          delete_search_key=self.delete_key,
                                          save_settings=self.save))
 
-    def settings(self) -> str | Text | None:
-        return asyncio.run(self.app.change_settings())
+    def run_menu(self, *steps: object) -> None:
+        self.inline.side_effect = list(steps)
+        self.assertIsNone(asyncio.run(self.app.change_settings()))
+
+    def search_menus(self) -> list[list[tuple[str, str]]]:
+        return [args.args[1] for args in self.inline.await_args_list if args.args[0] == "Web search"]
 
     def test_menu_shows_the_key_row_only_when_a_key_is_saved(self) -> None:
-        self.inline.side_effect = ["search", asyncio.CancelledError()]
-        self.assertIsNone(self.settings())
-        self.assertEqual(self.inline.await_args_list[-1], call("Web search", [("enabled", "Web search          off")]))
+        self.run_menu("search", ESC, ESC)
+        self.assertEqual(self.search_menus(), [[("enabled", "Web search          off")]])
 
-        self.inline.side_effect = ["search", asyncio.CancelledError()]
+        self.inline.reset_mock()
         self.app.search_key = KEY
         self.app.settings = ON
-        self.assertIsNone(self.settings())
-        rows = cast(list[tuple[str, str]], self.inline.await_args_list[-1].args[1])
-        self.assertEqual(rows, [("enabled", "Web search          on"), ("key", "Key                 tvly-dev-•••-key ›")])
+        self.run_menu("search", ESC, ESC)
+        self.assertEqual(self.search_menus(),
+                         [[("enabled", "Web search          on"), ("key", "Key                 tvly-dev-•••-key ›")]])
 
     def test_switch_saved_on_without_a_key_shows_off(self) -> None:
         self.app.settings = ON
-        self.inline.side_effect = ["search", asyncio.CancelledError()]
-        self.assertIsNone(self.settings())
-        self.assertEqual(self.inline.await_args_list[-1], call("Web search", [("enabled", "Web search          off")]))
+        self.run_menu("search", ESC, ESC)
+        self.assertEqual(self.search_menus(), [[("enabled", "Web search          off")]])
 
-    def test_first_turn_on_asks_for_the_key_checks_it_and_saves_it_on(self) -> None:
-        self.inline.side_effect = ["search", "enabled"]
-
-        self.assertEqual(self.settings(), "Web search on")
+    def test_first_turn_on_asks_for_the_key_checks_it_and_shows_it_on(self) -> None:
+        self.run_menu("search", "enabled", ESC, ESC)
 
         self.secret.assert_awaited_once_with("Paste your Tavily API key")
         self.check.assert_called_once_with(f" {KEY} ")
         self.save_key.assert_called_once_with(KEY)
         self.save.assert_called_once_with(ON)
         self.assertEqual((self.app.search_key, self.app.settings), (KEY, ON))
+        self.assertEqual(self.search_menus()[1][0], ("enabled", "Web search          on"))
 
     def test_spinner_says_checking_while_the_key_is_checked_and_clears_after(self) -> None:
         seen: list[tuple[str | None, bool]] = []
@@ -424,50 +441,42 @@ class SearchSettingsCommandTests(unittest.TestCase):
                 self.app.search_key = None
                 self.app.loading_model = loading
                 self.check.side_effect = check
-                self.inline.side_effect = ["search", "enabled"]
-                self.assertEqual(self.settings(), "Web search on")
+                self.run_menu("search", "enabled", ESC, ESC)
                 self.assertEqual(seen[-1], ("Checking Tavily key…", True))
                 self.assertEqual((self.app.auth_status, self.app.loading_model), (None, loading))
 
-    def test_spinner_clears_when_the_key_is_rejected(self) -> None:
-        self.inline.side_effect = ["search", "enabled"]
-        self.check.side_effect = RuntimeError("Tavily key was rejected.")
-
-        with self.assertRaisesRegex(RuntimeError, "rejected"):
-            _ = self.settings()
-        self.assertEqual((self.app.auth_status, self.app.loading_model), (None, False))
-
-    def test_bad_key_saves_nothing_and_stays_off(self) -> None:
+    def test_rejected_key_saves_nothing_stays_off_and_clears_the_spinner(self) -> None:
         self.inline.side_effect = ["search", "enabled"]
         self.check.side_effect = RuntimeError("Tavily key was rejected.")
 
         with self.assertRaisesRegex(RuntimeError, "Tavily key was rejected"):
-            _ = self.settings()
+            asyncio.run(self.app.change_settings())
         self.save_key.assert_not_called()
         self.save.assert_not_called()
         self.assertEqual((self.app.search_key, self.app.settings), (None, DEFAULTS))
+        self.assertEqual((self.app.auth_status, self.app.loading_model), (None, False))
 
-    def test_escape_at_the_key_prompt_saves_nothing(self) -> None:
-        self.inline.side_effect = ["search", "enabled"]
-        self.secret.side_effect = asyncio.CancelledError()
+    def test_escape_at_the_key_prompt_returns_to_the_menu_and_saves_nothing(self) -> None:
+        self.secret.side_effect = ESC
+        self.run_menu("search", "enabled", ESC, ESC)
 
-        self.assertIsNone(self.settings())
         self.check.assert_not_called()
         self.save_key.assert_not_called()
         self.save.assert_not_called()
+        self.assertEqual(len(self.search_menus()), 2)
         self.assertEqual((self.app.search_key, self.app.settings), (None, DEFAULTS))
 
     def test_with_a_saved_key_the_switch_flips_without_asking(self) -> None:
-        self.inline.side_effect = ["search", "enabled", "search", "enabled"]
         self.app.search_key = KEY
         self.app.settings = ON
-        self.assertEqual(self.settings(), "Web search off")
-        self.assertEqual(self.app.settings, DEFAULTS)
-        self.assertEqual(self.settings(), "Web search on")
+        self.run_menu("search", "enabled", "enabled", ESC, ESC)
+
         self.assertEqual(self.app.settings, ON)
         self.secret.assert_not_awaited()
         self.save_key.assert_not_called()
         self.assertEqual(self.save.call_args_list, [call(DEFAULTS), call(ON)])
+        self.assertEqual([menu[0][1] for menu in self.search_menus()],
+                         ["Web search          on", "Web search          off", "Web search          on"])
 
     def test_failed_save_keeps_the_current_setting(self) -> None:
         self.inline.side_effect = ["search", "enabled"]
@@ -475,45 +484,43 @@ class SearchSettingsCommandTests(unittest.TestCase):
         self.save.side_effect = RuntimeError("Could not save settings.")
 
         with self.assertRaisesRegex(RuntimeError, "Could not save settings."):
-            _ = self.settings()
+            asyncio.run(self.app.change_settings())
         self.assertEqual(self.app.settings, DEFAULTS)
 
-    def test_replacing_the_key_keeps_the_switch(self) -> None:
-        self.inline.side_effect = ["search", "key", "replace"]
+    def test_replacing_the_key_keeps_the_switch_and_shows_the_new_key(self) -> None:
         self.app.search_key = KEY
         self.secret.return_value = "tvly-dev-another-key"
-
-        self.assertEqual(self.settings(), "Web search key replaced · tvly-dev-•••-key")
+        self.run_menu("search", "key", "replace", ESC, ESC)
 
         self.assertEqual(self.inline.await_args_list[2],
-                         call("Web search key", [("replace", "Replace key"), ("remove", "Remove key")]))
+                         call("Web search key", [("replace", "Replace key"), ("remove", "Remove key")], default=None))
         self.save_key.assert_called_once_with("tvly-dev-another-key")
         self.save.assert_not_called()
         self.assertEqual((self.app.search_key, self.app.settings), ("tvly-dev-another-key", DEFAULTS))
+        self.assertEqual(self.search_menus()[1][1], ("key", "Key                 tvly-dev-•••-key ›"))
 
-    def test_removing_the_key_turns_web_search_off(self) -> None:
-        self.inline.side_effect = ["search", "key", "remove"]
+    def test_removing_the_key_turns_web_search_off_and_hides_the_key_row(self) -> None:
         self.app.search_key = KEY
         self.app.settings = ON
-
-        self.assertEqual(self.settings(), "Web search key removed · web search off")
+        self.run_menu("search", "key", "remove", ESC, ESC)
 
         self.delete_key.assert_called_once_with()
         self.save.assert_called_once_with(DEFAULTS)
         self.assertEqual((self.app.search_key, self.app.settings), (None, DEFAULTS))
+        self.assertEqual(self.search_menus()[1], [("enabled", "Web search          off")])
 
     def test_escape_in_the_key_menu_or_prompt_changes_nothing(self) -> None:
-        for side_effect, secret in (
-            (["search", asyncio.CancelledError()], None),
-            (["search", "key", asyncio.CancelledError()], None),
-            (["search", "key", "replace"], asyncio.CancelledError()),
+        for steps, secret in (
+            (["search", ESC, ESC], None),
+            (["search", "key", ESC, ESC, ESC], None),
+            (["search", "key", "replace", ESC, ESC], ESC),
         ):
-            with self.subTest(secret=secret):
-                self.inline.side_effect = side_effect
+            with self.subTest(steps=steps):
+                self.inline.reset_mock()
                 self.secret.side_effect = secret
                 self.app.search_key = KEY
                 self.app.settings = ON
-                self.assertIsNone(self.settings())
+                self.run_menu(*steps)
                 self.save_key.assert_not_called()
                 self.save.assert_not_called()
                 self.delete_key.assert_not_called()

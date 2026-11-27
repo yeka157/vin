@@ -251,6 +251,40 @@ class SessionPromptCheckpointTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.owner, "stream_reply", side_effect=reply):
             return await self.owner.chat_loop()
 
+    async def no_reply(self, _text: str) -> None:
+        raise AssertionError("A command must not start a model turn")
+
+    async def test_settings_and_tasks_leave_nothing_in_the_transcript(self) -> None:
+        self.owner.transcript.append({"role": "assistant", "content": "Earlier answer"})
+        before = list(self.owner.transcript)
+        with patch.object(self.owner, "change_settings", AsyncMock(return_value=None)) as settings, \
+                patch.object(self.owner, "show_panel", AsyncMock()) as panel:
+            _ = await self.run_prompts(["/settings", "/tasks", "/quit"], self.no_reply)
+
+        settings.assert_awaited_once_with()
+        panel.assert_awaited_once()
+        shown = cast(tuple[object, ...], present(panel.await_args).args)
+        self.assertEqual(str(shown[0]), "No subagents in this conversation.")
+        self.assertEqual(self.owner.transcript, before)
+
+    async def test_failed_settings_save_shows_only_the_error(self) -> None:
+        failure = AsyncMock(side_effect=RuntimeError("Could not save settings."))
+        with patch.object(self.owner, "change_settings", failure):
+            _ = await self.run_prompts(["/settings", "/quit"], self.no_reply)
+
+        entry, = self.owner.transcript
+        self.assertEqual(entry["role"], "notice")
+        self.assertEqual(str(entry["content"]), "Could not save settings.")
+        assert isinstance(entry["content"], Text)
+        self.assertEqual(entry["content"].style, "red")
+
+    async def test_model_command_still_shows_in_the_transcript(self) -> None:
+        with patch.object(self.owner, "change_model", AsyncMock(return_value="Model: OpenRouter · Coder")):
+            _ = await self.run_prompts(["/model", "/quit"], self.no_reply)
+
+        self.assertEqual([(entry["role"], str(entry["content"])) for entry in self.owner.transcript],
+                         [("user", "/model"), ("notice", "Model: OpenRouter · Coder")])
+
     async def test_prompt_is_saved_before_reply_and_clear_starts_another_identity(self) -> None:
         observed: list[SessionRecord] = []
 

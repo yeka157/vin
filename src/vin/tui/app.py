@@ -114,10 +114,10 @@ class VinApp:
     def search_on(self) -> bool:
         return settings_menu.search_on(self)
 
-    async def toggle_search(self) -> str | None:
+    async def toggle_search(self) -> None:
         return await settings_menu.toggle_search(self)
 
-    async def change_search_key(self) -> str | None:
+    async def change_search_key(self) -> None:
         return await settings_menu.change_search_key(self)
 
     async def sign_in_openrouter(self) -> None:
@@ -333,25 +333,12 @@ class VinApp:
                                     {"role": "notice", "content": outcome}
                                 )
                         elif text == "/settings":
-                            try:
-                                outcome = await self.change_settings()
-                            except (RuntimeError, OSError, ValueError) as error:
-                                outcome = Text(str(error), style="red")
-                            self.transcript.append({"role": "user", "content": text})
-                            if outcome is not None:
-                                self.transcript.append(
-                                    {"role": "notice", "content": outcome}
-                                )
+                            # Menus only: nothing goes in the transcript unless saving fails.
+                            await self.change_settings()
                         elif text == "/tasks":
-                            try:
-                                outcome = await self.open_task()
-                            except (RuntimeError, OSError, ValueError) as error:
-                                outcome = Text(str(error), style="red")
-                            self.transcript.append({"role": "user", "content": text})
+                            outcome = await self.open_task()
                             if outcome is not None:
-                                self.transcript.append(
-                                    {"role": "notice", "content": outcome}
-                                )
+                                await self.show_panel(Text(outcome))
                         elif text == "/compact":
                             self.reply_entry = None
                             self.pending_reply = asyncio.create_task(
@@ -588,16 +575,16 @@ class VinApp:
         self.loading_model = True
         self.run_conversation()
 
-    async def toggle_fetch(self) -> str:
+    async def toggle_fetch(self) -> None:
         return await settings_menu.toggle_fetch(self)
 
-    async def change_subagent_settings(self) -> str | None:
+    async def change_subagent_settings(self) -> None:
         return await settings_menu.change_subagent_settings(self)
 
-    async def change_web_search_settings(self) -> str | None:
+    async def change_web_search_settings(self) -> None:
         return await settings_menu.change_web_search_settings(self)
 
-    async def change_settings(self) -> str | None:
+    async def change_settings(self) -> None:
         return await settings_menu.change_settings(self)
 
     async def open_task(self) -> str | None:
