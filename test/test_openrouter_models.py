@@ -175,6 +175,7 @@ class ModelCommandMethodTests(unittest.IsolatedAsyncioTestCase):
         self.vin.selected_provider, self.vin.selected_model = "chatgpt", "gpt"
         self.vin.last_usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
         self.pick = self.enterContext(patch.object(self.vin, "pick_models", AsyncMock()))
+        self.inline = self.enterContext(patch.object(self.vin, "choose_inline", AsyncMock(return_value="use")))
         self.catalog = self.enterContext(patch.object(model_menu_module, "list_openrouter_models", return_value=[CODER, OPUS, GEMINI]))
         self.save_list = self.enterContext(patch.object(model_menu_module, "save_openrouter_whitelist"))
         self.save_choice = self.enterContext(patch.object(model_menu_module, "save_model_preference"))
@@ -199,6 +200,71 @@ class ModelCommandMethodTests(unittest.IsolatedAsyncioTestCase):
         self.save_choice.assert_called_once_with("openrouter", "acme/coder")
         self.assert_selection("openrouter", "acme/coder")
         self.assertIsNone(self.vin.last_usage)
+
+    async def test_openrouter_model_opens_a_menu_to_use_or_remove_it(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.pick.return_value = [CODER]
+        self.assertEqual(await self.vin.change_model(), "Model: OpenRouter · Acme: Coder")
+        self.inline.assert_awaited_once_with(
+            "Acme: Coder", [("use", "Use this model"), ("remove", "Remove from your models")], default=None)
+
+    async def test_chatgpt_model_switches_without_a_menu(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.vin.selected_provider, self.vin.selected_model = "openrouter", "acme/coder"
+        self.pick.return_value = [GPT]
+        self.assertEqual(await self.vin.change_model(), "Model: ChatGPT · GPT")
+        self.inline.assert_not_awaited()
+
+    async def test_remove_returns_to_the_list_without_that_model(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.pick.side_effect = [[CODER], None]
+        self.inline.return_value = "remove"
+
+        self.assertEqual(await self.vin.change_model(), "Removed OpenRouter · Acme: Coder.")
+
+        self.save_list.assert_called_once_with([])
+        self.assertEqual(self.pick.await_args_list[1].args[1], [GPT])
+        self.assert_selection("chatgpt", "gpt")
+        self.save_choice.assert_not_called()
+
+    async def test_removing_the_current_model_clears_it_until_another_is_picked(self) -> None:
+        self.vin.models = [GPT, CODER, OPUS]
+        self.vin.credentials = fixture_credentials()
+        self.vin.selected_provider, self.vin.selected_model = "openrouter", "acme/coder"
+        self.pick.side_effect = [[CODER], [OPUS]]
+        self.inline.side_effect = ["remove", "use"]
+
+        self.assertEqual(await self.vin.change_model(),
+                         "Removed OpenRouter · Acme: Coder.\nModel: OpenRouter · Anthropic: Claude Opus")
+        self.assertEqual(self.pick.await_args_list[1].kwargs["current"], ("openrouter", ""))
+        self.assert_selection("openrouter", "anthropic/claude-opus")
+
+    async def test_removing_the_current_model_then_esc_leaves_no_model(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.vin.selected_provider, self.vin.selected_model = "openrouter", "acme/coder"
+        self.pick.side_effect = [[CODER], None]
+        self.inline.return_value = "remove"
+        self.assertEqual(await self.vin.change_model(), "Removed OpenRouter · Acme: Coder.")
+        self.assert_selection("openrouter", None)
+        self.assertIsNone(self.vin.last_usage)
+
+    async def test_esc_in_the_model_menu_returns_to_the_list(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.pick.side_effect = [[CODER], [GPT]]
+        self.inline.side_effect = asyncio.CancelledError()
+        self.assertIsNone(await self.vin.change_model())
+        self.assertEqual(self.pick.await_count, 2)
+        self.save_list.assert_not_called()
+        self.assert_selection("chatgpt", "gpt")
+
+    async def test_failed_removal_save_is_an_error_and_keeps_the_model(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.pick.return_value = [CODER]
+        self.inline.return_value = "remove"
+        self.save_list.side_effect = RuntimeError("Could not save OpenRouter models.")
+        with self.assertRaisesRegex(RuntimeError, "Could not save OpenRouter models."):
+            await self.vin.change_model()
+        self.assertIn(CODER, self.vin.models)
 
     async def test_picking_the_current_model_changes_nothing(self) -> None:
         self.vin.credentials = fixture_credentials()

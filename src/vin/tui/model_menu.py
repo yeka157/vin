@@ -15,7 +15,7 @@ from vin.provider.openrouter import (
 )
 from vin.provider.preferences import load_model_preference, save_model_preference
 from vin.tui.constants import PROVIDER_LABELS
-from vin.tui.menus import choose_chatgpt_model, task_is_cancelling
+from vin.tui.menus import choose_chatgpt_model, choose_or_back, task_is_cancelling
 from vin.tui.model_picker import ModelPicker
 from vin.types.models import ModelMetadata, ModelPreference, Provider
 from vin.types.transcript import TranscriptEntry
@@ -176,6 +176,7 @@ async def change_model(owner: "VinApp") -> str | Text | None:
         return "No models yet. Use /model add to add an OpenRouter model."
     tab = 0 if owner.models else 1
     outcome: str | None = None
+    removed: list[str] = []
     while True:
         if tab == 1:
             added = await add_models(owner, "", tab=1)
@@ -201,16 +202,25 @@ async def change_model(owner: "VinApp") -> str | Text | None:
             tab = picked
             continue
         chosen = picked[0] if picked else None
-        if chosen is not None and (chosen["provider"], chosen["slug"]) != (
-            owner.selected_provider,
-            owner.selected_model,
-        ):
+        if chosen is None:
+            break
+        if chosen["provider"] == "openrouter":
+            action = await choose_or_back(
+                owner, chosen["display_name"],
+                [("use", "Use this model"), ("remove", "Remove from your models")],
+            )
+            if action is None:
+                continue
+            if action == "remove":
+                removed.append(forget_models(owner, [chosen]))
+                continue
+        if (chosen["provider"], chosen["slug"]) != (owner.selected_provider, owner.selected_model):
             outcome = owner.select_model(chosen)
         break
+    lines = [*removed, *([outcome] if outcome else [])]
     if unavailable is None:
-        return outcome
-    warning = Text(unavailable, style="red")
-    return warning if outcome is None else Text("\n").join([warning, Text(outcome)])
+        return "\n".join(lines) or None
+    return Text("\n").join([Text(unavailable, style="red"), *map(Text, lines)])
 
 
 async def add_openrouter_model(owner: "VinApp", query: str) -> str | None:
@@ -260,6 +270,18 @@ async def add_models(owner: "VinApp", query: str, *, tab: int | None = None) -> 
     )
 
 
+def forget_models(owner: "VinApp", models: list[ModelMetadata]) -> str:
+    """Remove OpenRouter models from the saved list; clear the selection if it was one of them."""
+    gone = {model["slug"] for model in models}
+    owner.save_whitelist(
+        [m for m in owner.models if m["provider"] == "openrouter" and m["slug"] not in gone]
+    )
+    if owner.selected_provider == "openrouter" and owner.selected_model in gone:
+        owner.selected_model = None
+        owner.last_usage = None
+    return f"Removed OpenRouter · {', '.join(m['display_name'] for m in models)}."
+
+
 async def remove_openrouter_model(owner: "VinApp") -> str | None:
     whitelist = [
         model for model in owner.models if model["provider"] == "openrouter"
@@ -271,14 +293,8 @@ async def remove_openrouter_model(owner: "VinApp") -> str | None:
     )
     if not isinstance(picked, list) or not picked:
         return None
-    removed = {m["slug"] for m in picked}
-    owner.save_whitelist([m for m in whitelist if m["slug"] not in removed])
-    message = (
-        f"Removed OpenRouter · {', '.join(m['display_name'] for m in picked)}."
-    )
-    if owner.selected_provider == "openrouter" and owner.selected_model in removed:
-        owner.selected_model = None
-        owner.last_usage = None
+    message = forget_models(owner, picked)
+    if owner.selected_provider == "openrouter" and owner.selected_model is None:
         outcome = owner.auto_select_model()
         if not outcome and owner.models:
             outcome = await owner.change_model()

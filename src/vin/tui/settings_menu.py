@@ -10,7 +10,7 @@ from vin.auth.search import (
     save_search_key,
 )
 from vin.settings import save_settings
-from vin.tui.menus import setting_row, task_is_cancelling
+from vin.tui.menus import choose_or_back, setting_row, task_is_cancelling
 from vin.types.settings import Settings, SettingsChange
 
 if TYPE_CHECKING:
@@ -45,18 +45,6 @@ def update_settings(owner: "VinApp", **changes: Unpack[SettingsChange]) -> Setti
 
 def search_on(owner: "VinApp") -> bool:
     return owner.settings["search"] and owner.search_key is not None
-
-
-async def choose_or_back(
-    owner: "VinApp", title: str, rows: list[tuple[str, str]], focus: str | None = None
-) -> str | None:
-    """One menu step; None when the user presses Esc to go back."""
-    try:
-        return await owner.choose_inline(title, rows, default=focus)
-    except asyncio.CancelledError:
-        if task_is_cancelling():
-            raise
-        return None
 
 
 async def toggle_search(owner: "VinApp") -> None:

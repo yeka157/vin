@@ -217,3 +217,15 @@ async def show_panel(owner: "VinApp", content: RenderableType) -> None:
         owner.choice_future = None
         owner.session.layout.focus(owner.input_window)
         owner.app.invalidate()
+
+
+async def choose_or_back(
+    owner: "VinApp", title: str, rows: list[tuple[str, str]], focus: str | None = None
+) -> str | None:
+    """One menu step; None when the user presses Esc to go back."""
+    try:
+        return await owner.choose_inline(title, rows, default=focus)
+    except asyncio.CancelledError:
+        if task_is_cancelling():
+            raise
+        return None
