@@ -19,7 +19,7 @@ Vin is a terminal coding agent in Python: a prompt-toolkit/Rich TUI, ChatGPT sig
 
 Run from the repo root; running inside `test/` breaks the helper imports.
 
-- Tests: `uv run python -m unittest discover -s test`
+- Tests: `HOME="$(mktemp -d)" .venv/bin/python -m unittest discover -s test`. The empty HOME keeps a test whose patch misses from writing to the real `~/.config/vin`.
 - Types: `uv run basedpyright` (strict, `reportAny` is an error)
 - Whitespace: `git diff --check`
 
