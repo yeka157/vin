@@ -16,7 +16,7 @@ from vin.auth.openrouter import (
     save_openrouter_account,
 )
 from vin.provider.openrouter import load_openrouter_whitelist
-from vin.tui.menus import task_is_cancelling
+from vin.tui.menus import choose_or_back, task_is_cancelling
 from vin.types.auth import AccountRecord, Credentials, Registration
 
 if TYPE_CHECKING:
@@ -81,17 +81,39 @@ async def prepare_request_credentials(owner: "VinApp") -> AccountRecord | None:
     return await asyncio.shield(owner.credential_refresh)
 
 
-async def run_auth_command(owner: "VinApp", text: str) -> None:
-    owner.loading_model = True
-    task = asyncio.create_task(
-        owner.initialize_session(sign_in=True)
-        if text == "/login"
-        else (
-            owner.sign_out_openrouter()
-            if owner.selected_provider == "openrouter"
-            else owner.sign_out()
+async def logout_targets(owner: "VinApp") -> list[str]:
+    """Which accounts /logout signs out of: asks when both are signed in."""
+    chatgpt = bool(owner.credentials and owner.credentials.get("access_token"))
+    openrouter = owner.openrouter is not None
+    if chatgpt and openrouter:
+        choice = await choose_or_back(
+            owner, "Sign out of",
+            [("chatgpt", "ChatGPT"), ("openrouter", "OpenRouter"), ("both", "Both")],
         )
-    )
+        return [] if choice is None else ["chatgpt", "openrouter"] if choice == "both" else [choice]
+    if chatgpt or openrouter:
+        return ["chatgpt" if chatgpt else "openrouter"]
+    owner.transcript.append({"role": "notice", "content": "You're not signed in."})
+    return []
+
+
+async def run_auth_command(owner: "VinApp", text: str) -> None:
+    targets = [] if text == "/login" else await logout_targets(owner)
+    if text == "/logout" and not targets:
+        return
+
+    async def work() -> None:
+        if text == "/login":
+            await owner.initialize_session(sign_in=True)
+            return
+        for target in targets:
+            if target == "openrouter":
+                await owner.sign_out_openrouter(load_models="chatgpt" not in targets)
+            else:
+                await owner.sign_out()
+
+    owner.loading_model = True
+    task = asyncio.create_task(work())
     owner.pending_auth = task
     owner.app.invalidate()
 
@@ -168,7 +190,7 @@ async def sign_out(owner: "VinApp", *, announce: bool = True) -> None:
         owner.transcript.append(
             {
                 "role": "notice",
-                "content": "Signed out of Vin.",
+                "content": "Signed out of ChatGPT.",
             }
         )
 
@@ -176,7 +198,9 @@ async def sign_out(owner: "VinApp", *, announce: bool = True) -> None:
         raise asyncio.CancelledError
 
 
-async def sign_out_openrouter(owner: "VinApp", *, announce: bool = True) -> None:
+async def sign_out_openrouter(
+    owner: "VinApp", *, announce: bool = True, load_models: bool = True
+) -> None:
     delete_openrouter_account()
     owner.openrouter = None
     owner.set_models("openrouter", [])
@@ -192,5 +216,5 @@ async def sign_out_openrouter(owner: "VinApp", *, announce: bool = True) -> None
         owner.transcript.append(
             {"role": "notice", "content": "Signed out of OpenRouter."}
         )
-    if owner.selected_provider == "chatgpt":
+    if load_models and owner.selected_provider == "chatgpt":
         await owner.load_initial_model()

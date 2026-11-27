@@ -473,7 +473,8 @@ class ChatFlowTests(unittest.TestCase):
             for fragment in to_formatted_text(transcript_ui.render_transcript(entries, 80, 20))
         )
         self.assertNotIn("ChatGPT: learner@example.test", rendered)
-        self.assertEqual(rendered.count("Signed out of Vin."), 1)
+        self.assertEqual(rendered.count("Signed out of ChatGPT."), 1)
+        self.assertEqual(rendered.count("/logout"), 1, "/logout shows in the transcript")
         self.assertNotIn("Signed out. Use /login to sign in", rendered)
         self.assertNotIn("Commands", rendered)
         self.assertIn("earlier question", rendered)
@@ -1247,7 +1248,7 @@ class ModelCommandTests(unittest.TestCase):
         self.run_chat(read)
 
         self.assertEqual(self.vin_app.messages, exchange)
-        self.assertEqual(self.vin_app.transcript[1:], exchange)
+        self.assertEqual(self.vin_app.transcript[1:], [*exchange, {"role": "user", "content": "/login"}])
         self.assertEqual(mock_run(self.vin_app.app).await_count, 1)
         self.logout.assert_not_called()
         self.login.assert_not_called()
@@ -1321,7 +1322,7 @@ class ModelCommandTests(unittest.TestCase):
         self.assertIsNone(self.vin_app.last_usage)
         self.assertEqual(
             [str(entry["content"]) for entry in self.vin_app.transcript[1:]],
-            [warning, "Signed out of Vin."],
+            ["/logout", warning, "Signed out of ChatGPT."],
         )
         self.assertEqual(self.vin_app.messages, [])
         self.assert_model_indicator(" Not signed in · /login")

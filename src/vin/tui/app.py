@@ -254,8 +254,8 @@ class VinApp:
     async def sign_out(self, *, announce: bool = True) -> None:
         return await accounts.sign_out(self, announce=announce)
 
-    async def sign_out_openrouter(self, *, announce: bool = True) -> None:
-        return await accounts.sign_out_openrouter(self, announce=announce)
+    async def sign_out_openrouter(self, *, announce: bool = True, load_models: bool = True) -> None:
+        return await accounts.sign_out_openrouter(self, announce=announce, load_models=load_models)
 
     async def chat_loop(self) -> str:
 
@@ -303,6 +303,7 @@ class VinApp:
                     parts = text.split(maxsplit=1)
                     try:
                         if text in ("/login", "/logout"):
+                            self.transcript.append({"role": "user", "content": text})
                             await self.run_auth_command(text)
                         elif parts[0] == "/resume":
                             query = parts[1] if len(parts) > 1 else None

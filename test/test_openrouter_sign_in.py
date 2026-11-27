@@ -378,12 +378,17 @@ class SignOutTests(unittest.IsolatedAsyncioTestCase):
         self.vin.models = [CHATGPT_MODEL, OPENROUTER_MODEL]
         self.delete = self.enterContext(patch.object(accounts_module, "delete_openrouter_account"))
         self.load_initial = self.enterContext(patch.object(self.vin, "load_initial_model", AsyncMock()))
+        self.inline = self.enterContext(patch.object(self.vin, "choose_inline", AsyncMock()))
 
     async def test_openrouter_logout_switches_to_a_signed_in_chatgpt(self) -> None:
         self.vin.credentials = fixture_credentials()
         self.vin.selected_provider, self.vin.selected_model = "openrouter", "acme/coder"
+        self.inline.return_value = "openrouter"
 
         await self.vin.run_auth_command("/logout")
+
+        self.inline.assert_awaited_once_with(
+            "Sign out of", [("chatgpt", "ChatGPT"), ("openrouter", "OpenRouter"), ("both", "Both")], default=None)
 
         self.delete.assert_called_once_with()
         self.assertIsNone(self.vin.openrouter)
@@ -392,6 +397,51 @@ class SignOutTests(unittest.IsolatedAsyncioTestCase):
         self.load_initial.assert_awaited_once_with()
         self.assertEqual(self.vin.credentials, fixture_credentials())
         self.assertEqual(notices(self.vin.transcript), ["Signed out of OpenRouter."])
+
+    async def test_logout_signs_out_of_the_chosen_account_not_the_selected_provider(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.vin.selected_provider, self.vin.selected_model = "openrouter", "acme/coder"
+        self.inline.return_value = "chatgpt"
+
+        with patch.object(accounts_module, "logout_chatgpt", return_value=fixture_registration()) as logout:
+            await self.vin.run_auth_command("/logout")
+
+        logout.assert_called_once()
+        self.delete.assert_not_called()
+        self.assertEqual(self.vin.openrouter, ACCOUNT)
+        self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("openrouter", "acme/coder"))
+        self.assertEqual(notices(self.vin.transcript), ["Signed out of ChatGPT."])
+
+    async def test_logout_both_signs_out_of_each_without_loading_chatgpt_models(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.vin.selected_provider, self.vin.selected_model = "openrouter", "acme/coder"
+        self.inline.return_value = "both"
+
+        with patch.object(accounts_module, "logout_chatgpt", return_value=fixture_registration()):
+            await self.vin.run_auth_command("/logout")
+
+        self.delete.assert_called_once_with()
+        self.load_initial.assert_not_awaited()
+        self.assertIsNone(self.vin.openrouter)
+        self.assertEqual(self.vin.credentials, fixture_registration())
+        self.assertEqual((self.vin.selected_provider, self.vin.selected_model), (None, None))
+        self.assertEqual(notices(self.vin.transcript), ["Signed out of ChatGPT.", "Signed out of OpenRouter."])
+
+    async def test_escape_in_the_logout_menu_signs_out_of_nothing(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.inline.side_effect = asyncio.CancelledError()
+        with patch.object(accounts_module, "logout_chatgpt") as logout:
+            await self.vin.run_auth_command("/logout")
+        logout.assert_not_called()
+        self.delete.assert_not_called()
+        self.assertFalse(self.vin.loading_model)
+        self.assertEqual(self.vin.transcript, [])
+
+    async def test_logout_when_signed_out_says_so(self) -> None:
+        self.vin.openrouter = None
+        await self.vin.run_auth_command("/logout")
+        self.inline.assert_not_awaited()
+        self.assertEqual(notices(self.vin.transcript), ["You're not signed in."])
 
     async def test_openrouter_logout_alone_leaves_nothing_selected(self) -> None:
         self.vin.selected_provider, self.vin.selected_model = "openrouter", "acme/coder"
@@ -416,6 +466,7 @@ class SignOutTests(unittest.IsolatedAsyncioTestCase):
         self.vin.credentials = fixture_credentials()
         self.vin.selected_provider, self.vin.selected_model = "chatgpt", "gpt"
 
+        self.inline.return_value = "chatgpt"
         with patch.object(accounts_module, "logout_chatgpt", return_value=fixture_registration()):
             await self.vin.run_auth_command("/logout")
 
