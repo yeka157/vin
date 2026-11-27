@@ -247,6 +247,62 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(styles["Your models"], "class:placeholder")
         self.assertTrue(picker.footer().endswith(" · Enter choose · Tab switch"))
 
+    def tabbed(self, switched: list[int] | None = None) -> ModelPicker:
+        picker: ModelPicker | None = None
+
+        def on_switch() -> None:
+            assert picker is not None and picker.switch_to is not None
+            if switched is not None:
+                switched.append(picker.switch_to)
+
+        picker = ModelPicker("Choose a model", [OPUS, SONNET], multi=False, action="choose",
+                             tabs=("Your models", "Add from OpenRouter"), on_switch=on_switch)
+        return picker
+
+    def active(self, keys: tuple[str | Keys, ...], picker: ModelPicker) -> bool:
+        control = picker.search_window.content
+        assert isinstance(control, BufferControl) and control.key_bindings is not None
+        return any(b.filter() for b in control.key_bindings.get_bindings_for_keys(keys))
+
+    def test_up_from_search_focuses_the_tab_row_and_down_returns(self) -> None:
+        picker = self.tabbed()
+        self.press(picker, "down")
+        self.press(picker, "up")
+        self.assertEqual((picker.row, picker.tab_focus), (None, False), "first Up goes to the search")
+        self.press(picker, "up")
+        self.assertTrue(picker.tab_focus)
+        self.assertEqual(picker.footer(), "   ←→ switch tab · ↓ search")
+        self.assertEqual(picker.chosen(), [], "Enter on the tab row picks nothing")
+        styles = [part[0] for part in picker.title_line() if part[1].strip() == "Your models"]
+        self.assertEqual(styles, ["fg:#ffffff bg:#5868a8 bold underline"])
+        self.press(picker, "up")
+        self.assertTrue(picker.tab_focus, "Up on the tab row stays there")
+        self.press(picker, "down")
+        self.assertEqual((picker.row, picker.tab_focus), (None, False))
+        self.assertTrue(picker.footer().endswith("Tab switch"))
+
+    def test_left_and_right_switch_tabs_only_from_the_tab_row(self) -> None:
+        switched: list[int] = []
+        picker = self.tabbed(switched)
+        self.assertFalse(self.active((Keys.Right,), picker), "Right moves the search cursor")
+        self.assertFalse(self.active((Keys.Left,), picker))
+        self.press(picker, "up")
+        self.press(picker, Keys.Right)
+        self.press(picker, Keys.Left)
+        self.assertEqual(switched, [1, 1], "two tabs: both directions open the other one")
+
+    def test_typing_on_the_tab_row_returns_to_search(self) -> None:
+        picker = self.tabbed()
+        self.press(picker, "up")
+        self.press(picker, Keys.Any, "o")
+        self.assertEqual((picker.tab_focus, picker.search.text), (False, "o"))
+
+    def test_without_tabs_up_stays_in_search(self) -> None:
+        picker = ModelPicker("Add", [OPUS], multi=True, action="add")
+        self.press(picker, "up")
+        self.assertFalse(picker.tab_focus)
+        self.assertFalse(ModelPicker("Add", [OPUS], multi=True, action="add", tab_focus=True).tab_focus)
+
     def test_without_tabs_tab_does_nothing_and_the_title_stays(self) -> None:
         picker = ModelPicker("Add", [OPUS], multi=True, action="add")
         self.assertEqual(picker.title_line(), [("bold", " Add")])
@@ -334,6 +390,31 @@ class PickModelsTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     _ = task.cancel()
                     _ = await asyncio.gather(task, return_exceptions=True)
+
+    async def test_switching_from_the_tab_row_keeps_focus_there_in_the_next_tab(self) -> None:
+        tabs = ("Your models", "Add from OpenRouter")
+        task = await self.open([OPUS], tabs=tabs)
+        picker = self.vin.picker
+        assert picker is not None
+        picker.tab_focus = True
+        PickerTests.press(cast(PickerTests, None), picker, Keys.Right)
+        self.assertEqual(await task, 1)
+
+        task = await self.open([OPUS], tabs=tabs, tab=1)
+        picker = self.vin.picker
+        assert picker is not None
+        self.assertEqual((picker.tab_focus, picker.row), (True, None))
+        self.assertFalse(self.vin.picker_tab_focus, "the carried focus is used once")
+        PickerTests.press(cast(PickerTests, None), picker, Keys.ControlI)
+        self.assertEqual(await task, 0)
+        self.assertTrue(self.vin.picker_tab_focus)
+
+        task = await self.open([OPUS])
+        picker = self.vin.picker
+        assert picker is not None
+        self.assertFalse(picker.tab_focus, "a picker without tabs never starts on the tab row")
+        task.cancel()
+        _ = await asyncio.gather(task, return_exceptions=True)
 
     async def test_a_second_picker_is_refused_while_one_is_open(self) -> None:
         task = await self.open([OPUS])

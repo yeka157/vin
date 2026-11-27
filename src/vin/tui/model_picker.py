@@ -56,12 +56,15 @@ class ModelPicker:
         tabs: Sequence[str] = (),
         tab: int = 0,
         on_switch: Callable[[], None] | None = None,
+        tab_focus: bool = False,
     ) -> None:
         self.title = title
         self.tabs = tabs
         self.tab = tab
-        # Set by Tab / Shift+Tab: the tab the caller should open next.
+        # Set when the user switches tabs: the tab the caller should open next.
         self.switch_to: int | None = None
+        # The tab row has focus (Up from the search box): Left/Right switch tabs.
+        self.tab_focus = tab_focus and len(tabs) > 1
         self.models = models
         self.multi = multi
         self.action = action
@@ -78,6 +81,8 @@ class ModelPicker:
             (i for i, m in enumerate(models) if (m["provider"], m["slug"]) == current),
             None,
         )
+        if self.tab_focus:
+            self.row = None
         kb = KeyBindings()
 
         @kb.add("up")
@@ -86,12 +91,16 @@ class ModelPicker:
                 self.row = None
             elif self.row is not None:
                 self.row -= 1
+            elif len(self.tabs) > 1:
+                self.tab_focus = True
             event.app.invalidate()
 
         @kb.add("down")
         def _down(event: KeyPressEvent) -> None:
             count = len(self.matches())
-            if count:
+            if self.tab_focus:
+                self.tab_focus = False
+            elif count:
                 self.row = 0 if self.row is None else min(self.row + 1, count - 1)
             event.app.invalidate()
 
@@ -101,9 +110,10 @@ class ModelPicker:
             self.checked ^= {self.matches()[self.row]["slug"]}
             event.app.invalidate()
 
-        @kb.add(Keys.Any, filter=Condition(lambda: self.row is not None))
+        @kb.add(Keys.Any, filter=Condition(lambda: self.row is not None or self.tab_focus))
         def _type(event: KeyPressEvent) -> None:
             self.row = None
+            self.tab_focus = False
             if event.data.isprintable():
                 self.search.insert_text(event.data)
             event.app.invalidate()
@@ -123,6 +133,16 @@ class ModelPicker:
         def _previous_tab(_event: KeyPressEvent) -> None:
             switch(-1)
 
+        on_tabs = Condition(lambda: self.tab_focus)
+
+        @kb.add("right", filter=on_tabs)
+        def _right_tab(_event: KeyPressEvent) -> None:
+            switch(1)
+
+        @kb.add("left", filter=on_tabs)
+        def _left_tab(_event: KeyPressEvent) -> None:
+            switch(-1)
+
         self.search_window = Window(
             BufferControl(
                 self.search,
@@ -139,7 +159,7 @@ class ModelPicker:
                 key_bindings=kb,
             ),
             height=1,
-            always_hide_cursor=Condition(lambda: self.row is not None),
+            always_hide_cursor=Condition(lambda: self.row is not None or self.tab_focus),
         )
         self.container = HSplit(
             [
@@ -172,6 +192,8 @@ class ModelPicker:
         ]
 
     def chosen(self) -> list[ModelMetadata]:
+        if self.tab_focus:
+            return []
         if self.multi and len(self.checked) > 0:
             return [model for model in self.models if model["slug"] in self.checked]
         matches = self.matches()
@@ -227,8 +249,9 @@ class ModelPicker:
         if len(self.tabs) < 2:
             return [("bold", self.header())]
         line: StyleAndTextTuples = [("", " ")]
+        active = "fg:#ffffff bg:#5868a8 bold underline" if self.tab_focus else "fg:#ffffff bg:#303b59 bold"
         for index, name in enumerate(self.tabs):
-            style = "fg:#ffffff bg:#303b59 bold" if index == self.tab else "class:placeholder"
+            style = active if index == self.tab else "class:placeholder"
             line += [(style, f" {name} "), ("", " ")]
         if self.checked:
             line.append(("bold", f" {len(self.checked)} selected"))
@@ -240,6 +263,8 @@ class ModelPicker:
         )
 
     def footer(self) -> str:
+        if self.tab_focus:
+            return "   ←→ switch tab · ↓ search"
         text = f"   {len(self.matches())} of {len(self.models)} · ↑↓ move"
         if self.multi:
             text += " · Space select"

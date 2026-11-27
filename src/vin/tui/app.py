@@ -102,6 +102,7 @@ class VinApp:
         self.picker: ModelPicker | None = None
         self.exit_armed_until = 0.0
         self.copied_until = 0.0
+        self.picker_tab_focus = False
         self.search_key: str | None = None
 
     async def ask_secret(self, message: str) -> str:

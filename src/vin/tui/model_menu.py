@@ -121,10 +121,16 @@ async def pick_models(owner: "VinApp",
             owner.choice_future.set_result(None)
 
     picker = ModelPicker(title, models, multi=multi, action=action, current=current,
-                         search=search, tabs=tabs, tab=tab, on_switch=close)
+                         search=search, tabs=tabs, tab=tab, on_switch=close,
+                         tab_focus=bool(tabs) and owner.picker_tab_focus)
+    owner.picker_tab_focus = False
     if not await open_picker(owner, picker):
         return None
-    return picker.chosen() if picker.switch_to is None else picker.switch_to
+    if picker.switch_to is None:
+        return picker.chosen()
+    # Keep focus on the tab row when switching with Left/Right.
+    owner.picker_tab_focus = picker.tab_focus
+    return picker.switch_to
 
 
 MODEL_TABS = ("Your models", "Add from OpenRouter")
