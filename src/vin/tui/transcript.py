@@ -1,6 +1,7 @@
 """Transcript message rendering, viewport scrolling, and mouse handling."""
 
 from io import StringIO
+import textwrap
 from collections.abc import Callable, Mapping, Sequence
 from types import NotImplementedType
 
@@ -12,7 +13,9 @@ from prompt_toolkit.formatted_text import (
     to_formatted_text,
 )
 from prompt_toolkit.layout.controls import UIContent, UIControl
+from prompt_toolkit.layout.utils import explode_text_fragments
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+from prompt_toolkit.utils import get_cwidth
 from rich.console import Console
 from rich.markdown import Markdown, Heading
 from rich.padding import Padding
@@ -283,14 +286,80 @@ def render_transcript(
     return fragments
 
 
+# A cell in the whole transcript: (line, column).
+type Position = tuple[int, int]
+
+
+def cells_between(
+    line: StyleAndTextTuples, start: int, end: int | None
+) -> list[tuple[bool, str, str]]:
+    """Each character as (selected, style, text), selected when its column is in [start, end)."""
+    cells: list[tuple[bool, str, str]] = []
+    column = 0
+    for fragment in explode_text_fragments(line):
+        style, text = fragment[0], fragment[1]
+        cells.append((column >= start and (end is None or column < end), style, text))
+        column += get_cwidth(text)
+    return cells
+
+
 class TranscriptControl(UIControl):
-    def __init__(self, get_entries: Callable[[], Sequence[TranscriptEntry]]) -> None:
+    def __init__(
+        self,
+        get_entries: Callable[[], Sequence[TranscriptEntry]],
+        on_copy: Callable[[str], None] | None = None,
+    ) -> None:
         self.get_entries = get_entries
+        self.on_copy = on_copy
         self.top_line: int | None = None
         self.line_count = 1
         self.viewport_height = 1
         self.group_headers: list[GroupHeader] = []
         self.visible_start = 0
+        self.lines: list[StyleAndTextTuples] = []
+        self.width = 0
+        # Mouse selection: where the drag started and where it is now.
+        self.anchor: Position | None = None
+        self.focus: Position | None = None
+        self.dragging = False
+
+    def selection(self) -> tuple[Position, Position] | None:
+        if self.anchor is None or self.focus is None or self.anchor == self.focus:
+            return None
+        return (self.anchor, self.focus) if self.anchor <= self.focus else (self.focus, self.anchor)
+
+    def selected_columns(self, line: int) -> tuple[int, int | None] | None:
+        """The selected column range [start, end) on one line, or None."""
+        selected = self.selection()
+        if selected is None:
+            return None
+        (first, start), (last, end) = selected
+        if not first <= line <= last:
+            return None
+        return (start if line == first else 0, end + 1 if line == last else None)
+
+    def selected_text(self) -> str:
+        selected = self.selection()
+        if selected is None:
+            return ""
+        (first, start), (last, _) = selected
+        rows: list[str] = []
+        for number in range(first, min(last, len(self.lines) - 1) + 1):
+            columns = self.selected_columns(number)
+            assert columns is not None
+            cells = cells_between(self.lines[number], *columns)
+            rows.append("".join(text for inside, _, text in cells if inside).rstrip())
+        # Drop the transcript's left margin from whole lines, keeping indentation inside them.
+        whole = rows if start == 0 else rows[1:]
+        kept = rows[: len(rows) - len(whole)]
+        return "\n".join([*kept, *textwrap.dedent("\n".join(whole)).split("\n")]) if whole else "\n".join(rows)
+
+    def clear_selection(self) -> None:
+        self.anchor = self.focus = None
+        self.dragging = False
+
+    def position(self, mouse_event: MouseEvent) -> Position:
+        return (self.visible_start + mouse_event.position.y, mouse_event.position.x)
 
     def scroll(self, lines: int) -> None:
         last_top_line = max(0, self.line_count - self.viewport_height)
@@ -302,14 +371,32 @@ class TranscriptControl(UIControl):
         self.top_line = None
 
     def mouse_handler(self, mouse_event: MouseEvent) -> NotImplementedType | None:
-        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+        kind = mouse_event.event_type
+        left = mouse_event.button == MouseButton.LEFT
+        if kind == MouseEventType.SCROLL_UP:
             self.scroll(-3)
-        elif mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+        elif kind == MouseEventType.SCROLL_DOWN:
             self.scroll(3)
-        elif (
-            mouse_event.event_type == MouseEventType.MOUSE_UP
-            and mouse_event.button == MouseButton.LEFT
-        ):
+        elif kind == MouseEventType.MOUSE_DOWN and left:
+            self.anchor = self.focus = self.position(mouse_event)
+            self.dragging = True
+        elif kind == MouseEventType.MOUSE_MOVE and left and self.dragging:
+            # Dragging on the first or last row scrolls, so a selection can grow past the screen.
+            if mouse_event.position.y <= 0:
+                self.scroll(-1)
+            elif mouse_event.position.y >= self.viewport_height - 1:
+                self.scroll(1)
+            self.focus = self.position(mouse_event)
+        elif kind == MouseEventType.MOUSE_UP and left:
+            if self.dragging:
+                self.focus = self.position(mouse_event)
+                self.dragging = False
+                if self.selection() is not None:
+                    text = self.selected_text()
+                    if text and self.on_copy is not None:
+                        self.on_copy(text)
+                    return None
+            self.clear_selection()
             line = self.visible_start + mouse_event.position.y
 
             for start, end, first_tool in self.group_headers:
@@ -330,6 +417,11 @@ class TranscriptControl(UIControl):
             max(1, height or 1),
             group_headers=self.group_headers,
         ) + [[]]
+        if width != self.width:
+            # Lines rewrap at a new width, so old positions no longer point at the same text.
+            self.clear_selection()
+            self.width = width
+        self.lines = lines
         self.line_count = len(lines)
         self.viewport_height = max(1, height or 1)
         self.scroll(0)
@@ -340,8 +432,18 @@ class TranscriptControl(UIControl):
         self.visible_start = start
         visible_count = min(self.viewport_height, self.line_count - start)
 
+        def get_line(line_number: int) -> StyleAndTextTuples:
+            line = start + line_number
+            columns = self.selected_columns(line)
+            if columns is None:
+                return lines[line]
+            return [
+                (f"{style} reverse" if inside else style, text)
+                for inside, style, text in cells_between(lines[line], *columns)
+            ]
+
         return UIContent(
-            get_line=lambda line_number: lines[start + line_number],
+            get_line=get_line,
             line_count=visible_count,
             cursor_position=Point(x=0, y=max(0, visible_count - 1)),
             show_cursor=False,

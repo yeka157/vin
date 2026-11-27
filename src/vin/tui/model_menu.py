@@ -328,6 +328,8 @@ def set_models(owner: "VinApp", provider: Provider, models: list[ModelMetadata])
 def model_indicator_text(owner: "VinApp") -> str:
     if monotonic() < owner.exit_armed_until:
         return " Press again to exit"
+    if monotonic() < owner.copied_until:
+        return " Copied to clipboard"
     subagent = owner.viewed_subagent()
     if subagent is not None:
         return (

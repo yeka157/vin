@@ -14,9 +14,10 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
-from prompt_toolkit.formatted_text import FormattedText, to_formatted_text
+from prompt_toolkit.formatted_text import FormattedText, StyleAndTextTuples, to_formatted_text
 from prompt_toolkit.input import DummyInput
 from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout.controls import UIContent
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
 from rich.console import Console
@@ -232,7 +233,7 @@ class ToolGroupClickTests(unittest.TestCase):
 
     def test_left_release_opens_then_closes_without_double_toggling_on_press(self) -> None:
         self.render()
-        self.assertIs(self.mouse(0, MouseEventType.MOUSE_DOWN), NotImplemented)
+        self.assertIsNone(self.mouse(0, MouseEventType.MOUSE_DOWN))
         self.assertFalse(self.first.get("expanded", False))
         self.assertIsNone(self.mouse(0))
         self.assertIs(self.first.get("expanded"), True)
@@ -295,6 +296,128 @@ class ToolGroupClickTests(unittest.TestCase):
                         await app.cancel_and_wait_for_background_tasks()
 
         asyncio.run(exercise())
+
+
+class SelectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.entries: list[TranscriptEntry] = [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "alpha beta gamma\n\ndelta epsilon"},
+        ]
+        self.copied: list[str] = []
+        self.control = TranscriptControl(lambda: self.entries, self.copied.append)
+
+    def render(self, width: int = 60, height: int = 40) -> list[StyleAndTextTuples]:
+        content = self.control.create_content(width, height)
+        return [content.get_line(line) for line in range(content.line_count)]
+
+    def text_of(self, line: StyleAndTextTuples) -> str:
+        return "".join(part[1] for part in line)
+
+    def find(self, word: str) -> tuple[int, int]:
+        """(row, column) of a word on screen."""
+        for row, line in enumerate(self.render()):
+            text = self.text_of(line)
+            if word in text:
+                return row, text.index(word)
+        raise AssertionError(f"{word!r} is not on screen")
+
+    def mouse(self, kind: MouseEventType, row: int, column: int, button: MouseButton = MouseButton.LEFT) -> NotImplementedType | None:
+        return self.control.mouse_handler(MouseEvent(
+            position=Point(x=column, y=row), event_type=kind, button=button, modifiers=frozenset()))
+
+    def drag(self, start: tuple[int, int], end: tuple[int, int]) -> None:
+        self.assertIsNone(self.mouse(MouseEventType.MOUSE_DOWN, *start))
+        self.assertIsNone(self.mouse(MouseEventType.MOUSE_MOVE, *end))
+        self.assertIsNone(self.mouse(MouseEventType.MOUSE_UP, *end))
+
+    def highlighted(self) -> str:
+        return "".join(part[1] for line in self.render() for part in line if "reverse" in part[0])
+
+    def test_drag_within_a_line_copies_and_highlights_the_cells(self) -> None:
+        row, column = self.find("beta")
+        self.drag((row, column), (row, column + len("beta gamma") - 1))
+        self.assertEqual(self.copied, ["beta gamma"])
+        self.assertEqual(self.highlighted(), "beta gamma")
+
+    def test_drag_across_lines_copies_each_line_and_drops_trailing_spaces(self) -> None:
+        start = self.find("gamma")
+        end_row, end_column = self.find("delta")
+        self.drag(start, (end_row, end_column + len("delta") - 1))
+        self.assertEqual(self.copied, ["gamma\n\ndelta"])
+
+    def test_dragging_backwards_selects_the_same_text(self) -> None:
+        row, column = self.find("beta")
+        self.drag((row, column + len("beta gamma") - 1), (row, column))
+        self.assertEqual(self.copied, ["beta gamma"])
+
+    def test_highlight_shows_while_dragging_before_release(self) -> None:
+        row, column = self.find("alpha")
+        _ = self.mouse(MouseEventType.MOUSE_DOWN, row, column)
+        _ = self.mouse(MouseEventType.MOUSE_MOVE, row, column + 4)
+        self.assertEqual(self.highlighted(), "alpha")
+        self.assertEqual(self.copied, [])
+
+    def test_a_click_without_dragging_copies_nothing_and_clears_the_selection(self) -> None:
+        row, column = self.find("alpha")
+        self.drag((row, column), (row, column + 4))
+        self.assertIsNone(self.mouse(MouseEventType.MOUSE_DOWN, row, column))
+        self.assertIs(self.mouse(MouseEventType.MOUSE_UP, row, column), NotImplemented)
+        self.assertEqual(self.copied, ["alpha"])
+        self.assertEqual(self.highlighted(), "")
+
+    def test_moving_without_a_pressed_button_selects_nothing(self) -> None:
+        row, column = self.find("alpha")
+        self.assertIs(self.mouse(MouseEventType.MOUSE_MOVE, row, column, MouseButton.NONE), NotImplemented)
+        self.assertEqual(self.highlighted(), "")
+
+    def test_selection_follows_the_text_when_scrolling(self) -> None:
+        self.entries.extend({"role": "assistant", "content": f"line {number}"} for number in range(60))
+        content = self.control.create_content(60, 10)
+        self.control.scroll(-1000)
+        content = self.control.create_content(60, 10)
+        row, column = self.find_in(content, "alpha")
+        self.drag((row, column), (row, column + 4))
+        self.control.scroll(1)
+        content = self.control.create_content(60, 10)
+        highlighted = "".join(part[1] for line in range(content.line_count)
+                              for part in content.get_line(line) if "reverse" in part[0])
+        self.assertEqual(highlighted, "alpha")
+
+    def find_in(self, content: UIContent, word: str) -> tuple[int, int]:
+        for row in range(content.line_count):
+            text = self.text_of(content.get_line(row))
+            if word in text:
+                return row, text.index(word)
+        raise AssertionError(f"{word!r} is not on screen")
+
+    def test_dragging_on_the_last_row_scrolls_down(self) -> None:
+        self.entries.extend({"role": "assistant", "content": f"line {number}"} for number in range(60))
+        _ = self.control.create_content(60, 10)
+        self.control.scroll(-1000)
+        _ = self.control.create_content(60, 10)
+        _ = self.mouse(MouseEventType.MOUSE_DOWN, 0, 2)
+        _ = self.mouse(MouseEventType.MOUSE_MOVE, 9, 2)
+        self.assertEqual(self.control.top_line, 1)
+
+    def test_indented_code_keeps_its_indentation_relative_to_the_margin(self) -> None:
+        self.entries[1] = {"role": "assistant", "content": "```\ndef f():\n    return 1\n```"}
+        def_row, _ = self.find("def f")
+        return_row, return_column = self.find("return 1")
+        self.drag((def_row, 0), (return_row, return_column + len("return 1") - 1))
+        self.assertEqual(self.copied, ["def f():\n    return 1"])
+
+    def test_resizing_clears_the_selection(self) -> None:
+        row, column = self.find("alpha")
+        self.drag((row, column), (row, column + 4))
+        _ = self.render(width=40)
+        self.assertEqual(self.highlighted(), "")
+
+    def test_wide_characters_are_selected_by_screen_column(self) -> None:
+        self.entries[1] = {"role": "assistant", "content": "中文 text"}
+        row, column = self.find("中文")
+        self.drag((row, column), (row, column + 3))
+        self.assertEqual(self.copied, ["中文"])
 
 
 class ToolGroupRenderingTests(unittest.TestCase):

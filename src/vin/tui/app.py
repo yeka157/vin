@@ -36,6 +36,7 @@ from vin.sessions.records import new_session
 from vin.settings import DEFAULT_SETTINGS, load_settings
 from vin.tools import LAUNCH_DIR
 from vin.tui import accounts, conversations, menus, model_menu, settings_menu, turns
+from vin.tui.clipboard import copy_to_clipboard
 from vin.tui.constants import PROVIDER_LABELS, is_command
 from vin.tui.layout import build_workspace
 from vin.tui.menus import task_is_cancelling
@@ -63,7 +64,7 @@ class VinApp:
         self.selected_model: str | None = None
         self.messages: History = []
         self.transcript: list[TranscriptEntry] = []
-        self.transcript_control = TranscriptControl(self.get_transcript_entries)
+        self.transcript_control = TranscriptControl(self.get_transcript_entries, self.copy_selection)
         self.pending_reply: (
             asyncio.Task[Literal["error", "rate_limit"] | None] | None
         ) = None
@@ -100,6 +101,7 @@ class VinApp:
         self.secret_future: asyncio.Future[str] | None = None
         self.picker: ModelPicker | None = None
         self.exit_armed_until = 0.0
+        self.copied_until = 0.0
         self.search_key: str | None = None
 
     async def ask_secret(self, message: str) -> str:
@@ -154,6 +156,11 @@ class VinApp:
                 }
             )
         return entries
+
+    def copy_selection(self, text: str) -> None:
+        copy_to_clipboard(text)
+        self.copied_until = monotonic() + 2
+        self.app.invalidate()
 
     async def prepare_request_credentials(self) -> AccountRecord | None:
         return await accounts.prepare_request_credentials(self)
