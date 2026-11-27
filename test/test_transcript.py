@@ -23,11 +23,14 @@ from rich.console import Console
 from rich.text import Text
 
 from test.tui_typing_helpers import key_event
-from vin.provider.events import ReplyEvent, ReplyEvents, ToolEventKind
+from vin.provider.events import ReplyEvents
+from vin.types.events import ReplyEvent, ToolEventKind
 from vin.tui import app as app_module, bindings, layout, transcript
 from vin.tui.app import VinApp
 from vin.tui.transcript import TranscriptControl, print_assistant_message, render_transcript
-from vin.types import Credentials, History, ToolEntry, TranscriptEntry
+from vin.types.auth import Credentials
+from vin.types.history import History
+from vin.types.transcript import ToolEntry, TranscriptEntry
 
 
 class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):

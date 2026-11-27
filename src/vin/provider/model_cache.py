@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from typing import cast
-from vin.types import ModelMetadata, Provider, is_record, is_list, is_string_list
+from vin.types.data import is_record, is_list, is_string_list
+from vin.types.models import ModelMetadata, Provider
 
 import json
 from hashlib import sha256

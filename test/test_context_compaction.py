@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 from vin import agent
 from vin.agent import AgentError, SUMMARY_PREFIX
-from vin.provider.events import EventSender
-from vin.types import History, ProviderItem
+from vin.types.events import EventSender
+from vin.types.history import History, ProviderItem
 
 type Reply = tuple[History, bool] | None
 

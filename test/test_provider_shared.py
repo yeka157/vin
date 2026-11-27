@@ -10,9 +10,11 @@ import httpx2
 import openai
 
 from vin import agent
-from vin.provider.events import EventSender, ReplyEvent, ReplyEvents
-from vin.provider.shared import Outcome, error_message, stream_reply
-from vin.types import History
+from vin.provider.events import ReplyEvents
+from vin.types.events import EventSender, ReplyEvent
+from vin.provider.shared import error_message, stream_reply
+from vin.types.agent import Outcome
+from vin.types.history import History
 
 SECRET = "sk-secret-value"
 

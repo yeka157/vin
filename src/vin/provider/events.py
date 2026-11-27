@@ -1,68 +1,24 @@
 from collections.abc import Callable
 from queue import SimpleQueue
 from threading import Event
-from typing import (
-    Literal,
-    NotRequired,
-    Protocol,
-    TypedDict,
-    cast,
-    overload,
-    runtime_checkable,
+from typing import Literal, cast, overload
+
+from vin.types.events import (
+    EventSender,
+    ReplyEvent,
+    SetMarker,
+    TextEventKind,
+    TokenUsage,
+    ToolEventKind,
+    ToolStarted,
 )
-
-from vin.types import History
-
-
-class TokenUsage(TypedDict):
-    input_tokens: int
-    output_tokens: int
-    total_tokens: int
-
-
-class ToolStarted(TypedDict):
-    name: str
-    detail: str
-    task_id: NotRequired[str]
-    prompt: NotRequired[str]
-
-
-type TextEventKind = Literal["text", "tool_diff", "error", "rate_limit"]
-type ToolEventKind = Literal["tool_started", "tool_finished", "tool_failed"]
-type ReplyEvent = (
-    tuple[TextEventKind, str]
-    | tuple[ToolEventKind, ToolStarted | str]
-    | tuple[Literal["usage"], TokenUsage]
-    | tuple[Literal["complete"], History | None]
-    | tuple[Literal["subagent"], SubagentEvent]
-)
-
-
-class EventSender(Protocol):
-    @overload
-    def __call__(self, kind: TextEventKind, value: str, /) -> None: ...
-    @overload
-    def __call__(self, kind: ToolEventKind, value: ToolStarted | str, /) -> None: ...
-    @overload
-    def __call__(self, kind: Literal["usage"], value: TokenUsage, /) -> None: ...
-    @overload
-    def __call__(self, kind: Literal["complete"], value: History | None, /) -> None: ...
-
-
-class SubagentEvent(TypedDict):
-    task_id: str
-    event: ReplyEvent
+from vin.types.history import History
 
 
 class ReplyEvents(SimpleQueue[ReplyEvent]):
     def __init__(self) -> None:
         super().__init__()
         self.tools_used = Event()
-
-
-@runtime_checkable
-class SetMarker(Protocol):
-    def set(self) -> object: ...
 
 
 def make_senders(

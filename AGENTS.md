@@ -9,6 +9,7 @@ Vin is a terminal coding agent in Python: a prompt-toolkit/Rich TUI, ChatGPT sig
 - `src/vin/provider/chatgpt.py` and `src/vin/provider/openrouter.py`: the provider-specific parts: the wire format (Responses or Chat Completions), sign-in details and the model list.
 - `src/vin/provider/events.py`: the event queue between the worker thread and the UI.
 - `src/vin/tools.py`: the four tools and `TOOL_REGISTRY`.
+- `src/vin/types/`: every named type (TypedDicts, `type` aliases, Protocols), one module per area: `data` (JSON values and guards), `history`, `models`, `auth`, `transcript`, `sessions`, `settings`, `events`, `agent` (the provider contract), `chatgpt` (the Responses client shape). Import from the owning module; `vin.types` itself exports nothing. A new type goes in the module for its area, or a new module when it starts a new area. These modules import only the standard library, Rich and each other, so anything can use them without an import cycle.
 - `src/vin/tui/`: the app (`app.py` holds `VinApp`, `stream_reply` and the command receiver), key bindings, layout and transcript rendering.
 - `src/vin/sessions/`: saving and resuming conversations.
 - `test/`: offline `unittest` suite. `*_helpers.py` hold shared fixtures and typed helpers.
@@ -25,7 +26,7 @@ Done means all three are clean. Paste the summary line of each as evidence.
 
 ## Code standards
 
-- Strict typing everywhere, `src` and `test`. Narrow untyped JSON with the guards in `vin.types` (`is_record`, `is_list`, `json_value`) instead of `Any` or loose casts.
+- Strict typing everywhere, `src` and `test`. Narrow untyped JSON with the guards in `vin.types.data` (`is_record`, `is_list`, `json_value`) instead of `Any` or loose casts.
 - Python 3.14 syntax: `type` aliases, `TypedDict`, `X | None`.
 - Model runs happen on a worker thread and talk to the UI only through `ReplyEvents`. Cancellation is a `threading.Event`.
 - `openai` and `vin.tools` are imported lazily inside functions to keep startup fast. Keep new heavy imports lazy too.

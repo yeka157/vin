@@ -44,7 +44,7 @@ from aisuite.utils.tools import Tools
 from openai.types.responses import FunctionToolParam
 
 from vin.auth.search import TAVILY_SEARCH_URL
-from vin.types import is_list, is_record
+from vin.types.data import is_list, is_record
 
 LAUNCH_DIR = Path.cwd().resolve()
 MAX_FILE_BYTES = 2_000_000

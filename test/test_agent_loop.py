@@ -51,9 +51,12 @@ from provider_typing_helpers import (
 from vin import agent
 from vin.provider import prompts
 from vin.provider.chatgpt import stream_chatgpt_response
-from vin.provider.events import ReplyEvent, ReplyEvents
+from vin.provider.events import ReplyEvents
+from vin.types.events import ReplyEvent
 import vin.tui as tui
-from vin.types import Credentials, History, JSONValue, is_string_list, json_value
+from vin.types.auth import Credentials
+from vin.types.data import JSONValue, is_string_list, json_value
+from vin.types.history import History
 
 if TYPE_CHECKING:
     from aisuite.utils.tools import ToolCall

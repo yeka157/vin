@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from vin.provider import model_cache
-from vin.types import Credentials, ModelMetadata
+from vin.types.auth import Credentials
+from vin.types.models import ModelMetadata
 
 
 class ChatGPTModelCacheTests(unittest.TestCase):

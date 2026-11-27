@@ -6,8 +6,8 @@ import unittest
 from unittest.mock import patch
 
 from vin import agent
-from vin.provider.events import EventSender, TextEventKind, ToolEventKind, ToolStarted, TokenUsage
-from vin.types import History
+from vin.types.events import EventSender, TextEventKind, ToolEventKind, ToolStarted, TokenUsage
+from vin.types.history import History
 
 
 class ProviderNeutralLoopTests(unittest.TestCase):

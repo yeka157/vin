@@ -7,7 +7,7 @@ from threading import Event, Thread
 from time import monotonic
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal
 from collections.abc import Coroutine, Sequence
 
 from prompt_toolkit import Application, PromptSession
@@ -79,25 +79,14 @@ from vin.tui.layout import build_workspace
 from vin.tui.model_picker import ModelPicker
 from vin.tui.subagents import apply_subagent_event, finish_subagent
 from vin.tui.transcript import TranscriptControl, format_duration, render_transcript
-from vin.provider.events import ReplyEvents, TokenUsage
-from vin.types import (
-    AccountRecord,
-    ActiveTurn,
-    AssistantEntry,
-    Credentials,
-    OpenRouterAccount,
-    Provider,
-    Registration,
-    History,
-    ModelMetadata,
-    ModelPreference,
-    SearchSettings,
-    SessionRecord,
-    Subagent,
-    SubagentSettings,
-    ToolEntry,
-    TranscriptEntry,
-)
+from vin.provider.events import ReplyEvents
+from vin.types.events import TokenUsage
+from vin.types.auth import AccountRecord, Credentials, OpenRouterAccount, Registration
+from vin.types.history import History
+from vin.types.models import Provider, ModelMetadata, ModelPreference
+from vin.types.sessions import ActiveTurn, SessionRecord
+from vin.types.settings import ReplyOptions, SearchSettings, SubagentSettings
+from vin.types.transcript import AssistantEntry, Subagent, ToolEntry, TranscriptEntry
 
 
 def _task_is_cancelling() -> bool:
@@ -226,15 +215,6 @@ def get_chatgpt_model_preference(
         }
     )
     return None
-
-
-class ReplyOptions(TypedDict, total=False):
-    compact_threshold: int
-    compact_only: bool
-    subagents: bool
-    subagent_budget: int
-    search: bool
-    fetch: bool
 
 
 class VinApp:

@@ -1,5 +1,6 @@
 from typing import cast
-from vin.types import EncodedEntry, SavedText, DecodedEntry, is_list, is_dictionary
+from vin.types.data import is_list, is_dictionary
+from vin.types.sessions import EncodedEntry, SavedText, DecodedEntry
 
 from rich.text import Span, Text
 

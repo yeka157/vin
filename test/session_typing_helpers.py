@@ -5,7 +5,9 @@ from typing import TypeVar, cast
 
 from rich.text import Text
 
-from vin.types import DecodedEntry, JSONValue, TranscriptEntry, is_json, is_list, is_record
+from vin.types.data import JSONValue, is_json, is_list, is_record
+from vin.types.sessions import DecodedEntry
+from vin.types.transcript import TranscriptEntry
 from vin.sessions.records import new_session, validate_session
 from vin.sessions.transcript import encode_transcript
 

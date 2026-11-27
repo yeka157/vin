@@ -23,8 +23,12 @@ from vin.agent import SUMMARY_PREFIX
 from vin.sessions import storage
 from vin.sessions.records import new_session, snapshot_session
 from vin.tui import app, conversations
-from vin.types import Credentials, History, ModelMetadata, SessionRecord
-from vin.provider.events import ReplyEvent, ReplyEvents, TokenUsage
+from vin.types.auth import Credentials
+from vin.types.history import History
+from vin.types.models import ModelMetadata
+from vin.types.sessions import SessionRecord
+from vin.provider.events import ReplyEvents
+from vin.types.events import ReplyEvent, TokenUsage
 from session_typing_helpers import list_value, present, record_value, string_value, text_value
 
 

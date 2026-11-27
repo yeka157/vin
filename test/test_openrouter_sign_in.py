@@ -31,7 +31,9 @@ from vin.tui import app as app_module
 from vin.tui.app import VinApp, get_chatgpt_model_preference
 from vin.tui.bindings import create_bindings
 from vin.tui.layout import build_workspace
-from vin.types import ModelMetadata, OpenRouterAccount, TranscriptEntry
+from vin.types.auth import OpenRouterAccount
+from vin.types.models import ModelMetadata
+from vin.types.transcript import TranscriptEntry
 from tui_application_helpers import fixture_credentials, fixture_registration
 
 KEY = "sk-or-v1-secret"

@@ -6,12 +6,14 @@ from threading import Event
 from urllib.error import HTTPError, URLError
 from vin.agent import AgentError
 from vin.auth.credentials import save_private_json
-from vin.provider.events import EventSender, ReplyEvent
+from vin.types.events import EventSender, ReplyEvent
 from vin.provider.shared import openai_client, stream_reply
 from vin.provider.model_cache import parse_models
-from vin.types import History, ModelMetadata, is_string_list
+from vin.types.data import is_string_list
+from vin.types.history import History
+from vin.types.models import ModelMetadata
 from vin.provider.prompts import instructions
-from vin.types import is_list, is_record
+from vin.types.data import is_list, is_record
 from typing import TYPE_CHECKING, cast
 from http.client import HTTPResponse
 from urllib.request import urlopen

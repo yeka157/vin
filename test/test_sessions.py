@@ -29,7 +29,10 @@ from vin.sessions.recovery import restore_session
 from vin.sessions.transcript import decode_content, decode_transcript, encode_transcript
 from vin.tui import conversations
 from vin.tui.app import VinApp
-from vin.types import ActiveTurn, DecodedEntry, History, JSONValue, Pathish, SessionRecord, Subagent, ToolEntry, TranscriptEntry
+from vin.types.data import JSONValue, Pathish
+from vin.types.history import History
+from vin.types.sessions import ActiveTurn, DecodedEntry, SessionRecord
+from vin.types.transcript import Subagent, ToolEntry, TranscriptEntry
 
 
 def probe_file_lock(path: Pathish) -> str:

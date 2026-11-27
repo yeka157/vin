@@ -28,8 +28,10 @@ from openai.types.responses import (
 
 from vin import agent
 from vin.provider import chatgpt, prompts
-from vin.provider.events import ReplyEvent, ReplyEvents
-from vin.types import History, JSONValue
+from vin.provider.events import ReplyEvents
+from vin.types.events import ReplyEvent
+from vin.types.data import JSONValue
+from vin.types.history import History
 from provider_typing_helpers import ClientDouble, RequestSnapshot, REQUEST_ADAPTER, credentials as fixture_credentials
 
 

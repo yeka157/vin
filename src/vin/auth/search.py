@@ -6,7 +6,8 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from vin.auth.credentials import save_private_json
-from vin.types import SearchSettings, is_record
+from vin.types.data import is_record
+from vin.types.settings import SearchSettings
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 SEARCH_KEY_PATH = Path.home() / ".config" / "vin" / "search.json"

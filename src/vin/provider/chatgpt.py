@@ -3,53 +3,21 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from threading import Event
 from queue import SimpleQueue
-from collections.abc import Iterable
-from contextlib import AbstractContextManager
-from typing import (
-    TYPE_CHECKING,
-    Literal,
-    Protocol,
-    cast,
-    runtime_checkable,
-)
+from typing import TYPE_CHECKING, cast
 
 from vin.agent import AgentError
 from vin.provider.shared import openai_client, stream_reply
 from vin.provider.prompts import instructions
-from vin.types import History, ModelMetadata, is_record, is_list, json_value
-from vin.provider.events import EventSender, ReplyEvent
+from vin.types.chatgpt import WireClient
+from vin.types.data import is_record, is_list, json_value
+from vin.types.history import History
+from vin.types.models import ModelMetadata
+from vin.types.events import EventSender, ReplyEvent
 
 if TYPE_CHECKING:
     from http.client import HTTPResponse
     from openai import OpenAI
-    from openai.types.responses import (
-        Response,
-        ResponseOutputItem,
-        ResponseStreamEvent,
-        FunctionToolParam,
-        ResponseIncludable,
-    )
-    from openai.types.shared_params import Reasoning
-
-
-class WireResponses(Protocol):
-    def create(
-        self,
-        *,
-        model: str,
-        input: History,
-        instructions: str,
-        tools: list["FunctionToolParam"],
-        reasoning: "Reasoning",
-        include: list["ResponseIncludable"],
-        store: bool,
-        stream: Literal[True],
-    ) -> AbstractContextManager[Iterable["ResponseStreamEvent"]]: ...
-
-
-@runtime_checkable
-class WireClient(Protocol):
-    responses: WireResponses
+    from openai.types.responses import Response, ResponseOutputItem
 
 
 def _wire_client(client: object) -> WireClient:

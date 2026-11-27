@@ -3,10 +3,11 @@ from time import monotonic
 from typing import Literal, cast
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from rich.text import Text
-from vin.provider.events import ReplyEvent
+from vin.types.events import ReplyEvent
 from vin.sessions.transcript import decode_transcript
 from vin.tui.transcript import format_duration
-from vin.types import SessionRecord, Subagent, TranscriptEntry
+from vin.types.sessions import SessionRecord
+from vin.types.transcript import Subagent, TranscriptEntry
 
 
 def apply_subagent_event(subagent: Subagent, event: ReplyEvent) -> None:

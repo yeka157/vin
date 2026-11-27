@@ -19,7 +19,7 @@ from prompt_toolkit.layout.processors import (
 from prompt_toolkit.widgets import Frame
 
 from vin.tui.constants import PROVIDER_LABELS
-from vin.types import ModelMetadata
+from vin.types.models import ModelMetadata
 
 
 def context_label(model: ModelMetadata) -> str:

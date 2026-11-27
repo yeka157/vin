@@ -24,7 +24,10 @@ from vin.auth.credentials import load_credential_record, save_private_json
 from vin.provider.events import ReplyEvents
 from vin.tui import app as tui
 from vin.tui.app import VinApp
-from vin.types import Credentials, History, Identity, JSONValue, ModelMetadata, Registration
+from vin.types.auth import Credentials, Identity, Registration
+from vin.types.data import JSONValue
+from vin.types.history import History
+from vin.types.models import ModelMetadata
 
 
 class TokenExchangeErrorTests(unittest.TestCase):

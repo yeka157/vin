@@ -23,7 +23,8 @@ from typing import TextIO
 from vin.provider.preferences import DEFAULT_SUBAGENT_SETTINGS
 from vin.tui import bindings, layout, transcript as transcript_ui
 from vin.tui.app import VinApp
-from vin.types import Credentials, TranscriptEntry
+from vin.types.auth import Credentials
+from vin.types.transcript import TranscriptEntry
 
 REAL_SLEEP = asyncio.sleep
 

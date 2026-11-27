@@ -20,7 +20,7 @@ from prompt_toolkit.output import DummyOutput
 from rich.text import Text
 
 from session_typing_helpers import present, string_value, text_value
-from vin.provider.events import TokenUsage
+from vin.types.events import TokenUsage
 from vin.sessions import storage
 from vin.sessions.records import new_session, snapshot_session
 from vin.sessions.transcript import encode_transcript
@@ -28,7 +28,11 @@ from vin.tui import app, conversations
 from vin.tui.app import VinApp
 from vin.tui.completion import SessionCompleter
 from vin.tui.layout import build_workspace
-from vin.types import ActiveTurn, Credentials, History, Pathish, SessionRecord, Subagent, TranscriptEntry
+from vin.types.auth import Credentials
+from vin.types.data import Pathish
+from vin.types.history import History
+from vin.types.sessions import ActiveTurn, SessionRecord
+from vin.types.transcript import Subagent, TranscriptEntry
 
 
 class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):

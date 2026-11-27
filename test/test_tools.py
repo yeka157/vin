@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from vin import tools
 from vin.tools import MAX_OUTPUT_CHARS, response_tools, truncate_output
-from vin.types import Pathish
+from vin.types.data import Pathish
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")

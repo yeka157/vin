@@ -3,7 +3,6 @@
 from io import StringIO
 from collections.abc import Callable, Mapping, Sequence
 from types import NotImplementedType
-from typing import Literal, TypedDict
 
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import (
@@ -21,7 +20,14 @@ from rich.text import Text
 
 from vin.tui.diff import print_diff as print_tool_diff
 from vin.tui.diff import format_edit_heading
-from vin.types import NoticeEntry, ToolEntry, TranscriptEntry
+from vin.types.transcript import (
+    GroupedEntry,
+    GroupHeader,
+    NoticeEntry,
+    ToolEntry,
+    ToolGroup,
+    TranscriptEntry,
+)
 
 
 class LeftHeading(Heading):
@@ -30,15 +36,6 @@ class LeftHeading(Heading):
 
 class LeftMarkdown(Markdown):
     elements = {**Markdown.elements, "heading_open": LeftHeading}
-
-
-class ToolGroup(TypedDict):
-    role: Literal["tool_group"]
-    entries: list[ToolEntry]
-
-
-type GroupedEntry = TranscriptEntry | ToolGroup
-type GroupHeader = tuple[int, int, ToolEntry]
 
 
 def format_duration(seconds: float) -> str:

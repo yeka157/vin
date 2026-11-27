@@ -23,13 +23,16 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from tui_typing_helpers import key_event
-from vin.provider.events import ReplyEvent, ReplyEvents, ToolStarted
+from vin.provider.events import ReplyEvents
+from vin.types.events import ReplyEvent, ToolStarted
 from vin.sessions import storage
 from vin.sessions.records import new_session
 from vin.tui import app as app_module, bindings, layout, subagents, transcript
 from vin.tui.app import VinApp
 from vin.tui.layout import build_workspace
-from vin.types import Credentials, History, Subagent, TranscriptEntry
+from vin.types.auth import Credentials
+from vin.types.history import History
+from vin.types.transcript import Subagent, TranscriptEntry
 
 
 TASK_STARTED: ToolStarted = {"name": "task", "detail": "Find sessions", "task_id": "call_task",

@@ -16,7 +16,7 @@ from vin import tools
 from vin.agent import execute_tool, tool_detail
 from vin.auth import search
 from vin.tools import response_tools, tool_cancellation, web_search
-from vin.types import is_record
+from vin.types.data import is_record
 
 KEY = "tvly-secret"
 

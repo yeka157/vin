@@ -1,5 +1,8 @@
 from typing import cast
-from vin.types import History, Pathish, SessionRecord, TranscriptEntry
+from vin.types.data import Pathish
+from vin.types.history import History
+from vin.types.sessions import SessionRecord
+from vin.types.transcript import TranscriptEntry
 
 from copy import deepcopy
 

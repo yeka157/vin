@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from typing import cast
-from vin.types import AccountRecord, Registration, Credentials, Identity, Pathish, is_record, is_string_list, json_value
+from vin.types.auth import AccountRecord, Registration, Credentials, Identity
+from vin.types.data import Pathish, is_record, is_string_list, json_value
 
 import json
 import os

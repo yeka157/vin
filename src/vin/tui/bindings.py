@@ -11,7 +11,7 @@ from rich.text import Text
 
 from vin.tui.constants import is_command
 from vin.tui.transcript import format_duration
-from vin.types import TranscriptEntry
+from vin.types.transcript import TranscriptEntry
 
 if TYPE_CHECKING:
     from vin.tui.app import VinApp

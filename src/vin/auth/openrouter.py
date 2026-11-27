@@ -5,7 +5,8 @@ from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from .credentials import save_private_json
-from vin.types import OpenRouterAccount, is_record
+from vin.types.auth import OpenRouterAccount
+from vin.types.data import is_record
 
 
 ACCOUNT_PATH = Path.home() / ".config" / "vin" / "openrouter.json"

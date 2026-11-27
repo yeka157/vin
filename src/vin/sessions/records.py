@@ -1,15 +1,9 @@
 from collections.abc import Sequence
 from typing import cast
-from vin.types import (
-    ActiveTurn,
-    History,
-    Pathish,
-    SessionRecord,
-    Subagent,
-    TranscriptEntry,
-    is_dictionary,
-    is_list,
-)
+from vin.types.data import Pathish, is_dictionary, is_list
+from vin.types.history import History
+from vin.types.sessions import ActiveTurn, SessionRecord
+from vin.types.transcript import Subagent, TranscriptEntry
 
 from copy import deepcopy
 from datetime import datetime, timezone

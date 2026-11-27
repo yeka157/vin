@@ -27,9 +27,13 @@ from functools import partial
 from collections.abc import Callable, Coroutine, Sequence
 from typing import Literal, TypedDict, cast
 from rich.console import RenderableType
-from vin.types import Credentials, History, ModelMetadata, TranscriptEntry
+from vin.types.auth import Credentials
+from vin.types.history import History
+from vin.types.models import ModelMetadata
+from vin.types.transcript import TranscriptEntry
 from vin.sessions.transcript import decode_transcript
-from vin.provider.events import ReplyEvents, TokenUsage
+from vin.provider.events import ReplyEvents
+from vin.types.events import TokenUsage
 from prompt_toolkit.layout.controls import UIContent
 from session_typing_helpers import present, text_value, validated_transcript
 from tui_typing_helpers import key_event

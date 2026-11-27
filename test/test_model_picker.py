@@ -22,7 +22,7 @@ from prompt_toolkit.output import DummyOutput
 from vin.tui.app import VinApp
 from vin.tui.bindings import create_bindings
 from vin.tui.model_picker import ModelPicker, context_label, price_labels
-from vin.types import ModelMetadata
+from vin.types.models import ModelMetadata
 
 OPUS: ModelMetadata = {"slug": "anthropic/claude-opus", "display_name": "Anthropic: Claude Opus",
                        "provider": "openrouter", "context_window": 1_048_576,

@@ -19,7 +19,8 @@ from vin.provider import preferences
 from vin.tui import app as app_module
 from vin.tui.app import VinApp
 from vin.auth import search
-from vin.types import SearchSettings, Subagent, SubagentSettings
+from vin.types.settings import SearchSettings, SubagentSettings
+from vin.types.transcript import Subagent
 
 
 class Response(io.BytesIO):

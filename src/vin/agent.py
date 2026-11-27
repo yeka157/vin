@@ -2,18 +2,11 @@ from contextlib import AbstractContextManager
 from threading import Event
 import json
 import re
-from typing import Callable, Literal, cast
-from vin.types import History, ProviderItem, is_record, is_list
-from vin.provider.events import EventSender
-
-type RequestFn = Callable[
-    [History, EventSender, bool, bool], tuple[History, bool] | None
-]
-
-type SubagentSender = Callable[[str], EventSender]
-
-type ErrorMessage = Callable[[Exception], tuple[Literal["error", "rate_limit"], str]]
-
+from typing import cast
+from vin.types.data import is_record, is_list
+from vin.types.history import History, ProviderItem
+from vin.types.agent import ErrorMessage, RequestFn, SubagentSender
+from vin.types.events import EventSender
 
 class AgentError(RuntimeError):
     pass

@@ -16,12 +16,18 @@ from urllib.request import Request, urlopen
 from jwt import PyJWKClient
 from jwt.algorithms import AllowedPublicKeys
 from collections.abc import Callable, Mapping
-from typing import Protocol, cast
+from typing import cast
 
-from vin.types import (
-    AccountRecord, AuthorizationCallback, Credentials, Registration, ExternalRecord, Identity, LoginAttempt,
-    is_list, is_record,
+from vin.types.auth import (
+    AccountRecord,
+    AuthorizationCallback,
+    CallbackServerState,
+    Credentials,
+    Registration,
+    Identity,
+    LoginAttempt,
 )
+from vin.types.data import ExternalRecord, is_list, is_record
 
 from .credentials import (
     ACTIVE_SESSION_PATH,
@@ -345,19 +351,6 @@ def refresh_credentials(credentials: Credentials) -> Credentials:
 
     save_credential_record(updated)
     return updated
-
-
-class CallbackServerState(Protocol):
-    server_port: int
-    expected_state: str
-    expected_client_id: str | None
-    callback_result: AuthorizationCallback | None
-    callback_error: RuntimeError | None
-    callback_done: Event
-    callback_lock: Lock
-
-    def serve_forever(self, poll_interval: float = 0.5) -> None: ...
-    def shutdown(self) -> None: ...
 
 
 class CallbackHandler(BaseHTTPRequestHandler):

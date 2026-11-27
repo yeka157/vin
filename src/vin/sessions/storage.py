@@ -1,6 +1,7 @@
 from collections.abc import Generator
 from typing import cast
-from vin.types import Pathish, SessionRecord
+from vin.types.data import Pathish
+from vin.types.sessions import SessionRecord
 
 from contextlib import contextmanager
 from datetime import datetime

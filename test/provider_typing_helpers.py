@@ -18,7 +18,8 @@ from openai.types.shared_params import Reasoning
 from openai.types.responses.response_create_params import ContextManagement
 from pydantic import TypeAdapter
 
-from vin.types import Credentials, History
+from vin.types.auth import Credentials
+from vin.types.history import History
 
 
 def credentials(access_token: str) -> Credentials:

@@ -21,9 +21,11 @@ import openai
 from vin import agent
 
 from vin.provider import prompts
-from vin.provider.events import ReplyEvent, ReplyEvents
+from vin.provider.events import ReplyEvents
+from vin.types.events import ReplyEvent
 from vin.provider.openrouter import stream_openrouter_response, to_chat_messages
-from vin.types import History, JSONValue, json_value
+from vin.types.data import JSONValue, json_value
+from vin.types.history import History
 
 if TYPE_CHECKING:
     from aisuite.utils.tools import ToolCall

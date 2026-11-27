@@ -19,7 +19,8 @@ from vin.tui import app as app_module
 from vin.tui.app import VinApp
 from vin.tui.completion import SessionCompleter
 from vin.tui.constants import is_command
-from vin.types import ModelMetadata, OpenRouterAccount
+from vin.types.auth import OpenRouterAccount
+from vin.types.models import ModelMetadata
 from tui_application_helpers import fixture_credentials
 
 ACCOUNT: OpenRouterAccount = {"key": "sk-or-v1-secret", "label": "laptop"}

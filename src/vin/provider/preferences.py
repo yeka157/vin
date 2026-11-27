@@ -1,5 +1,7 @@
 from typing import cast
-from vin.types import ModelPreference, SubagentSettings, is_record
+from vin.types.data import is_record
+from vin.types.models import ModelPreference
+from vin.types.settings import SubagentSettings
 
 import json
 from pathlib import Path

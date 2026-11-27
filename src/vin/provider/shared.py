@@ -9,36 +9,16 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from queue import SimpleQueue
 from threading import Event
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING
 
 from vin.agent import CONTEXT_FULL, context_too_long, run_reply
-from vin.provider.events import EventSender, ReplyEvent, make_senders
-from vin.types import History
+from vin.provider.events import make_senders
+from vin.types.agent import Complete, Outcome
+from vin.types.events import EventSender, ReplyEvent
+from vin.types.history import History
 
 if TYPE_CHECKING:
     from openai import OpenAI
-
-type Outcome = tuple[Literal["error", "rate_limit"], str]
-
-
-class Complete[C](Protocol):
-    """Send one model request in the provider's wire format and return its output items."""
-
-    def __call__(
-        self,
-        client: C,
-        model: str,
-        history: History,
-        send: EventSender,
-        cancel_event: Event,
-        *,
-        compact_only: bool,
-        subagent: bool,
-        task: bool,
-        search: bool,
-        fetch: bool,
-    ) -> tuple[History, bool] | None: ...
-
 
 def openai_client(
     base_url: str, headers: Mapping[str, str] | None = None
