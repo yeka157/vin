@@ -210,7 +210,7 @@ class StreamingResponseTests(unittest.TestCase):
         finally:
             self.closed.append("stream")
 
-    def invoke(self, source: Iterable[ResponseStreamEvent] = (), *, credentials: object = ..., model: object = "selected-model", compact_only: bool = False, subagents: bool = True, subagent_budget: int = 8, search: bool = False) -> Mock:
+    def invoke(self, source: Iterable[ResponseStreamEvent] = (), *, credentials: object = ..., model: object = "selected-model", compact_only: bool = False, subagents: bool = True, subagent_budget: int = 8, search: bool = False, fetch: bool = False) -> Mock:
         self.client.responses.create.return_value = self.stream(source)
         if credentials is ...:
             credentials = self.credentials
@@ -221,7 +221,7 @@ class StreamingResponseTests(unittest.TestCase):
         ):
             chatgpt.stream_chatgpt_response(
                 credentials, model, list(self.messages), self.events, self.cancel,
-                compact_only=compact_only, subagents=subagents, subagent_budget=subagent_budget, search=search,
+                compact_only=compact_only, subagents=subagents, subagent_budget=subagent_budget, search=search, fetch=fetch,
             )
         self.assertEqual(output.getvalue(), "")
         return constructor
@@ -295,6 +295,20 @@ class StreamingResponseTests(unittest.TestCase):
         request, = submitted
         self.assertEqual(request["tools"], response_tools(task=True, search=True))
         self.assertIn("web_search", [tool["name"] for tool in request["tools"]])
+
+    def test_web_fetch_on_offers_the_web_fetch_tool(self) -> None:
+        submitted: list[RequestSnapshot] = []
+
+        def source() -> Iterator[ResponseStreamEvent]:
+            submitted.append(REQUEST_ADAPTER.validate_python(cast(object, self.client.responses.create.call_args.kwargs)))
+            yield self.lifecycle()
+
+        self.invoke(source(), fetch=True)
+
+        from vin.tools import response_tools
+        request, = submitted
+        self.assertEqual(request["tools"], response_tools(task=True, fetch=True))
+        self.assertIn("web_fetch", [tool["name"] for tool in request["tools"]])
 
     def test_subagent_settings_reach_the_agent_loop(self) -> None:
         with patch.object(agent, "run_agent_turn", return_value=None) as turn:

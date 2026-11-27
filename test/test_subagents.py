@@ -151,7 +151,7 @@ class SubagentTranscriptTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(compaction, return_exceptions=True)
 
     async def test_a_turn_passes_the_saved_subagent_settings(self) -> None:
-        self.owner.subagent_settings = {"enabled": False, "budget": 3}
+        self.owner.subagent_settings = {"enabled": False, "budget": 3, "fetch": True}
         await self.start_turn()
 
         options = cast(dict[str, object], self.stream.call_args.kwargs)
@@ -166,6 +166,15 @@ class SubagentTranscriptTests(unittest.IsolatedAsyncioTestCase):
         self.owner.search_settings = {"key": "tvly-key", "enabled": False}
         await self.start_turn()
         self.assertIs(cast(dict[str, object], self.stream.call_args.kwargs)["search"], False)
+
+    async def test_a_turn_passes_web_fetch_on_by_default(self) -> None:
+        await self.start_turn()
+        self.assertIs(cast(dict[str, object], self.stream.call_args.kwargs)["fetch"], True)
+
+    async def test_a_turn_passes_web_fetch_off_when_it_is_off(self) -> None:
+        self.owner.subagent_settings = {"enabled": True, "budget": 8, "fetch": False}
+        await self.start_turn()
+        self.assertIs(cast(dict[str, object], self.stream.call_args.kwargs)["fetch"], False)
 
     async def test_a_turn_passes_web_search_off_without_a_key(self) -> None:
         self.owner.search_settings = None

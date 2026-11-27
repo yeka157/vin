@@ -255,6 +255,7 @@ class EncodedEntry(TypedDict, total=False):
 class SubagentSettings(TypedDict):
     enabled: bool
     budget: int
+    fetch: bool
 
 
 class SearchSettings(TypedDict):

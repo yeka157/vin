@@ -234,6 +234,7 @@ class ReplyOptions(TypedDict, total=False):
     subagents: bool
     subagent_budget: int
     search: bool
+    fetch: bool
 
 
 class VinApp:
@@ -629,6 +630,7 @@ class VinApp:
                 options["compact_only"] = True
 
             if not compact_only:
+                options["fetch"] = self.subagent_settings["fetch"]
                 options["subagents"] = self.subagent_settings["enabled"]
                 options["search"] = (
                     self.search_settings is not None and self.search_settings["enabled"]
@@ -1511,6 +1513,15 @@ class VinApp:
         self.loading_model = True
         self.run_conversation()
 
+    async def toggle_fetch(self) -> str:
+        updated: SubagentSettings = {
+            **self.subagent_settings,
+            "fetch": not self.subagent_settings["fetch"],
+        }
+        save_subagent_settings(updated)
+        self.subagent_settings = updated
+        return f"Web fetch {'on' if updated['fetch'] else 'off'}"
+
     async def change_subagent_settings(self) -> str | None:
         settings = self.subagent_settings
         rows: list[tuple[str, str]] = [
@@ -1533,6 +1544,7 @@ class VinApp:
             updated: SubagentSettings = {
                 "enabled": not settings["enabled"],
                 "budget": settings["budget"],
+                "fetch": settings["fetch"],
             }
         else:
             try:
@@ -1546,7 +1558,11 @@ class VinApp:
                     raise
                 return None
 
-            updated = {"enabled": settings["enabled"], "budget": int(value)}
+            updated = {
+                "enabled": settings["enabled"],
+                "budget": int(value),
+                "fetch": settings["fetch"],
+            }
 
         save_subagent_settings(updated)
         self.subagent_settings = updated
@@ -1577,6 +1593,13 @@ class VinApp:
                 [
                     ("subagents", setting_row("Subagents", "›")),
                     ("search", setting_row("Web search", "›")),
+                    (
+                        "fetch",
+                        setting_row(
+                            "Web fetch",
+                            "on" if self.subagent_settings["fetch"] else "off",
+                        ),
+                    ),
                 ],
             )
         except asyncio.CancelledError:
@@ -1587,6 +1610,8 @@ class VinApp:
             return await self.change_web_search_settings()
         elif choice == "subagents":
             return await self.change_subagent_settings()
+        elif choice == "fetch":
+            return await self.toggle_fetch()
         return None
 
     async def open_task(self) -> str | None:

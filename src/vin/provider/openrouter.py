@@ -88,6 +88,7 @@ def _request_completion(
     subagent: bool,
     task: bool,
     search: bool,
+    fetch: bool,
 ) -> tuple[History, bool] | None:
     from vin.tools import response_tools
     from openai import omit
@@ -106,7 +107,9 @@ def _request_completion(
                     "parameters": tool.get("parameters") or {},
                 },
             }
-            for tool in response_tools(task=task and not subagent, search=search)
+            for tool in response_tools(
+                task=task and not subagent, search=search, fetch=fetch
+            )
         ]
     )
     text: list[str] = []
@@ -199,6 +202,7 @@ def stream_openrouter_response(
     subagents: bool = True,
     subagent_budget: int = 8,
     search: bool = False,
+    fetch: bool = False,
 ) -> None:
     key = account.get("key") if is_record(account) else None
     stream_reply(
@@ -221,6 +225,7 @@ def stream_openrouter_response(
         subagents=subagents,
         subagent_budget=subagent_budget,
         search=search,
+        fetch=fetch,
     )
 
 

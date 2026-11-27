@@ -139,6 +139,7 @@ def _request_response(
     subagent: bool = False,
     task: bool = True,
     search: bool = False,
+    fetch: bool = False,
 ) -> tuple["Response", bool] | None:
     from vin.tools import response_tools
 
@@ -158,7 +159,11 @@ def _request_response(
         tools=(
             []
             if compact_only
-            else response_tools(task=task and not subagent, search=search)
+            else response_tools(
+                task=task and not subagent,
+                search=search,
+                fetch=fetch,
+            )
         ),
         reasoning={"effort": "medium"},
         include=["reasoning.encrypted_content"],
@@ -256,6 +261,7 @@ def _complete(
     subagent: bool,
     task: bool,
     search: bool,
+    fetch: bool = False,
 ) -> tuple[History, bool] | None:
     completed = _request_response(
         _wire_client(client),
@@ -267,6 +273,7 @@ def _complete(
         subagent=subagent,
         task=task,
         search=search,
+        fetch=fetch,
     )
     if completed is None:
         return None
@@ -293,6 +300,7 @@ def stream_chatgpt_response(
     subagents: bool = True,
     subagent_budget: int = 8,
     search: bool = False,
+    fetch: bool = False,
 ) -> None:
     """Run on a worker thread; publish text, complete, or error queue events."""
     fields = credentials if is_record(credentials) else {}
@@ -321,4 +329,5 @@ def stream_chatgpt_response(
         subagents=subagents,
         subagent_budget=subagent_budget,
         search=search,
+        fetch=fetch,
     )

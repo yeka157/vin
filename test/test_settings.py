@@ -115,39 +115,48 @@ class SubagentSettingsFileTests(unittest.TestCase):
 
     def test_missing_file_gives_a_fresh_copy_of_the_defaults(self) -> None:
         settings = preferences.load_subagent_settings()
-        self.assertEqual(settings, {"enabled": True, "budget": 8})
+        self.assertEqual(settings, {"enabled": True, "budget": 8, "fetch": True})
         settings["budget"] = 1
         self.assertEqual(preferences.DEFAULT_SUBAGENT_SETTINGS["budget"], 8)
 
     def test_saved_settings_load_back_including_the_limits(self) -> None:
         for budget in (1, 32):
             with self.subTest(budget=budget):
-                preferences.save_subagent_settings({"enabled": False, "budget": budget})
-                self.assertEqual(preferences.load_subagent_settings(), {"enabled": False, "budget": budget})
+                preferences.save_subagent_settings({"enabled": False, "budget": budget, "fetch": True})
+                self.assertEqual(preferences.load_subagent_settings(), {"enabled": False, "budget": budget, "fetch": True})
 
     def test_invalid_saved_settings_are_rejected(self) -> None:
         for body in ("not JSON", "[]", "{}", '{"enabled":true}', '{"budget":8}', '{"enabled":"yes","budget":8}',
                      '{"enabled":true,"budget":0}', '{"enabled":true,"budget":33}',
-                     '{"enabled":true,"budget":true}', '{"enabled":true,"budget":8.0}'):
+                     '{"enabled":true,"budget":true}', '{"enabled":true,"budget":8.0}',
+                     '{"enabled":true,"budget":8,"fetch":"no"}', '{"enabled":true,"budget":8,"fetch":null}'):
             with self.subTest(body=body):
                 self.destination.write_text(body, encoding="utf-8")
                 with self.assertRaises(RuntimeError) as raised:
                     preferences.load_subagent_settings()
                 self.assertIn(str(raised.exception), ("Saved settings are invalid.", "Could not read saved settings."))
 
+    def test_file_from_before_web_fetch_loads_with_web_fetch_on(self) -> None:
+        self.destination.write_text('{"enabled": false, "budget": 3}', encoding="utf-8")
+        self.assertEqual(preferences.load_subagent_settings(), {"enabled": False, "budget": 3, "fetch": True})
+
+    def test_web_fetch_off_is_saved_and_loads_back(self) -> None:
+        preferences.save_subagent_settings({"enabled": True, "budget": 8, "fetch": False})
+        self.assertEqual(preferences.load_subagent_settings(), {"enabled": True, "budget": 8, "fetch": False})
+
     def test_invalid_settings_are_not_saved(self) -> None:
         for budget in (0, 33):
             with self.subTest(budget=budget), self.assertRaisesRegex(RuntimeError, "Invalid settings."):
-                preferences.save_subagent_settings({"enabled": True, "budget": budget})
+                preferences.save_subagent_settings({"enabled": True, "budget": budget, "fetch": True})
         self.assertFalse(self.destination.exists())
 
     def test_failed_save_keeps_the_previous_file(self) -> None:
-        preferences.save_subagent_settings({"enabled": True, "budget": 8})
+        preferences.save_subagent_settings({"enabled": True, "budget": 8, "fetch": True})
         original = self.destination.read_bytes()
 
         with patch("vin.auth.credentials.os.replace", side_effect=OSError("disk full")), \
                 self.assertRaisesRegex(RuntimeError, "Could not save settings."):
-            preferences.save_subagent_settings({"enabled": False, "budget": 2})
+            preferences.save_subagent_settings({"enabled": False, "budget": 2, "fetch": True})
 
         self.assertEqual(self.destination.read_bytes(), original)
 
@@ -166,7 +175,8 @@ class SettingsCommandTests(unittest.TestCase):
         self.assertIsNone(asyncio.run(self.app.change_settings()))
 
         self.assertEqual(self.inline.await_args_list, [
-            call("Settings", [("subagents", "Subagents           ›"), ("search", "Web search          ›")]),
+            call("Settings", [("subagents", "Subagents           ›"), ("search", "Web search          ›"),
+                              ("fetch", "Web fetch           on")]),
             call("Subagents", [("enabled", "Subagents           on"), ("budget", "Request limit       8 ›")]),
         ])
         self.save.assert_not_called()
@@ -176,9 +186,39 @@ class SettingsCommandTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(self.app.change_settings()), "Subagents off · request limit 8")
 
-        off: SubagentSettings = {"enabled": False, "budget": 8}
+        off: SubagentSettings = {"enabled": False, "budget": 8, "fetch": True}
         self.save.assert_called_once_with(off)
         self.assertEqual(self.app.subagent_settings, off)
+
+    def test_web_fetch_row_toggles_and_saves_without_touching_subagents(self) -> None:
+        self.inline.side_effect = ["fetch"]
+        self.assertEqual(asyncio.run(self.app.change_settings()), "Web fetch off")
+        off: SubagentSettings = {"enabled": True, "budget": 8, "fetch": False}
+        self.save.assert_called_once_with(off)
+        self.assertEqual(self.app.subagent_settings, off)
+
+        self.inline.reset_mock()
+        self.inline.side_effect = ["fetch"]
+        self.assertEqual(asyncio.run(self.app.change_settings()), "Web fetch on")
+        self.assertEqual(self.inline.await_args_list[0].args[1][2], ("fetch", "Web fetch           off"))
+        self.assertEqual(self.app.subagent_settings["fetch"], True)
+
+    def test_changing_subagents_keeps_web_fetch_off(self) -> None:
+        self.app.subagent_settings = {"enabled": True, "budget": 8, "fetch": False}
+        for side_effect, expected in ((["subagents", "enabled"], {"enabled": False, "budget": 8, "fetch": False}),
+                                      (["subagents", "budget", "5"], {"enabled": True, "budget": 5, "fetch": False})):
+            with self.subTest(side_effect=side_effect):
+                self.app.subagent_settings = {"enabled": True, "budget": 8, "fetch": False}
+                self.inline.side_effect = side_effect
+                _ = asyncio.run(self.app.change_settings())
+                self.assertEqual(self.app.subagent_settings, expected)
+
+    def test_failed_web_fetch_save_keeps_it_on(self) -> None:
+        self.inline.side_effect = ["fetch"]
+        self.save.side_effect = RuntimeError("Could not save settings.")
+        with self.assertRaisesRegex(RuntimeError, "Could not save settings."):
+            asyncio.run(self.app.change_settings())
+        self.assertTrue(self.app.subagent_settings["fetch"])
 
     def test_request_limit_is_picked_from_one_to_thirty_two(self) -> None:
         self.inline.side_effect = ["subagents", "budget", "3"]
@@ -187,7 +227,7 @@ class SettingsCommandTests(unittest.TestCase):
 
         self.assertEqual(self.inline.await_args_list[2], call(
             "Subagent request limit", [(str(number), str(number)) for number in range(1, 33)], default="8"))
-        self.assertEqual(self.app.subagent_settings, {"enabled": True, "budget": 3})
+        self.assertEqual(self.app.subagent_settings, {"enabled": True, "budget": 3, "fetch": True})
 
     def test_escape_in_either_picker_changes_nothing(self) -> None:
         for side_effect in ([asyncio.CancelledError()], ["subagents", asyncio.CancelledError()],
@@ -197,7 +237,7 @@ class SettingsCommandTests(unittest.TestCase):
                 self.inline.side_effect = side_effect
                 self.assertIsNone(asyncio.run(self.app.change_settings()))
                 self.save.assert_not_called()
-                self.assertEqual(self.app.subagent_settings, {"enabled": True, "budget": 8})
+                self.assertEqual(self.app.subagent_settings, {"enabled": True, "budget": 8, "fetch": True})
 
     def test_failed_save_keeps_the_current_settings(self) -> None:
         self.inline.side_effect = ["subagents", "enabled"]
@@ -205,7 +245,7 @@ class SettingsCommandTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "Could not save settings."):
             asyncio.run(self.app.change_settings())
-        self.assertEqual(self.app.subagent_settings, {"enabled": True, "budget": 8})
+        self.assertEqual(self.app.subagent_settings, {"enabled": True, "budget": 8, "fetch": True})
 
     def test_bad_settings_file_shows_a_notice_and_keeps_defaults(self) -> None:
         self.app.credentials = fixture_credentials("token")
@@ -219,7 +259,7 @@ class SettingsCommandTests(unittest.TestCase):
         self.assertEqual(str(entry["content"]), "Saved settings are invalid.")
         assert isinstance(entry["content"], Text)
         self.assertEqual(entry["content"].style, "red")
-        self.assertEqual(self.app.subagent_settings, {"enabled": True, "budget": 8})
+        self.assertEqual(self.app.subagent_settings, {"enabled": True, "budget": 8, "fetch": True})
         self.assertEqual(self.app.selected_model, "m")
 
 
@@ -443,7 +483,7 @@ class SearchSettingsCommandTests(unittest.TestCase):
     def test_saved_settings_load_at_startup_and_a_bad_file_shows_a_notice(self) -> None:
         self.app.credentials = fixture_credentials("token")
         common = {
-            "load_subagent_settings": Mock(return_value={"enabled": True, "budget": 8}),
+            "load_subagent_settings": Mock(return_value={"enabled": True, "budget": 8, "fetch": True}),
             "load_model_preference": Mock(return_value={"provider": "chatgpt", "model": "m"}),
             "load_cached_chatgpt_models": Mock(return_value=[]),
             "load_openrouter_account": Mock(return_value=None),

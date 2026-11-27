@@ -3,6 +3,7 @@
 from contextlib import AbstractContextManager
 from threading import Event
 from types import TracebackType
+from typing import TypedDict
 import unittest
 
 import httpx2
@@ -22,6 +23,11 @@ def status_error(status: int, code: object = None, message: str = "bad") -> open
                                  body={"message": message, "code": code})
 
 
+class Flags(TypedDict, total=False):
+    search: bool
+    fetch: bool
+
+
 class FakeClient(AbstractContextManager[object]):
     def __init__(self) -> None:
         self.closed = False
@@ -38,6 +44,7 @@ class StreamReplyTests(unittest.TestCase):
         self.clients: list[FakeClient] = []
         self.keys: list[str] = []
         self.searches: list[bool] = []
+        self.fetches: list[bool] = []
 
     def connect(self, key: str) -> FakeClient:
         self.keys.append(key)
@@ -46,20 +53,23 @@ class StreamReplyTests(unittest.TestCase):
         return client
 
     def run_reply(self, key: str | None = SECRET, model: object = "any/model", problem: str | None = None,
-                  search: bool | None = None) -> list[ReplyEvent]:
+                  search: bool | None = None, fetch: bool | None = None) -> list[ReplyEvent]:
         def complete(client: FakeClient, model: str, history: History, send: EventSender, cancel_event: Event, *,
-                     compact_only: bool, subagent: bool, task: bool, search: bool) -> tuple[History, bool]:
+                     compact_only: bool, subagent: bool, task: bool, search: bool,
+                     fetch: bool) -> tuple[History, bool]:
             self.searches.append(search)
+            self.fetches.append(fetch)
             send("text", f"answer from {model}")
             return [{"type": "message", "role": "assistant",
                      "content": [{"type": "output_text", "text": "answer"}]}], True
 
-        if search is None:
-            stream_reply("Fake", key, model, [{"role": "user", "content": "hi"}], self.events, self.cancel,
-                         connect=self.connect, complete=complete, problem=problem)
-        else:
-            stream_reply("Fake", key, model, [{"role": "user", "content": "hi"}], self.events, self.cancel,
-                         connect=self.connect, complete=complete, problem=problem, search=search)
+        flags: Flags = {}
+        if search is not None:
+            flags["search"] = search
+        if fetch is not None:
+            flags["fetch"] = fetch
+        stream_reply("Fake", key, model, [{"role": "user", "content": "hi"}], self.events, self.cancel,
+                     connect=self.connect, complete=complete, problem=problem, **flags)
         result: list[ReplyEvent] = []
         while not self.events.empty():
             result.append(self.events.get_nowait())
@@ -77,6 +87,12 @@ class StreamReplyTests(unittest.TestCase):
         _ = self.run_reply(search=True)
         _ = self.run_reply(search=False)
         self.assertEqual(self.searches, [False, True, False])
+
+    def test_web_fetch_is_off_unless_asked_for_and_reaches_the_request(self) -> None:
+        _ = self.run_reply()
+        _ = self.run_reply(fetch=True)
+        _ = self.run_reply(fetch=False)
+        self.assertEqual(self.fetches, [False, True, False])
 
     def test_checks_run_in_order_before_connecting(self) -> None:
         cases: list[tuple[str | None, object, str | None, str]] = [

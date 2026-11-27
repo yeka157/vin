@@ -36,6 +36,7 @@ class Complete[C](Protocol):
         subagent: bool,
         task: bool,
         search: bool,
+        fetch: bool,
     ) -> tuple[History, bool] | None: ...
 
 
@@ -107,6 +108,7 @@ def stream_reply[C: AbstractContextManager[object]](
     subagents: bool = True,
     subagent_budget: int = 8,
     search: bool = False,
+    fetch: bool = False,
 ) -> None:
     """Run on a worker thread; publish text, complete, or error queue events.
 
@@ -143,6 +145,7 @@ def stream_reply[C: AbstractContextManager[object]](
             subagent=subagent,
             task=subagents,
             search=search,
+            fetch=fetch,
         )
 
     run_reply(

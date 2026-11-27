@@ -8,7 +8,11 @@ from vin.auth.credentials import save_private_json
 
 PREFERENCES_PATH = Path.home() / ".config" / "vin" / "preferences.json"
 SETTINGS_PATH = Path.home() / ".config" / "vin" / "settings.json"
-DEFAULT_SUBAGENT_SETTINGS: SubagentSettings = {"enabled": True, "budget": 8}
+DEFAULT_SUBAGENT_SETTINGS: SubagentSettings = {
+    "enabled": True,
+    "budget": 8,
+    "fetch": True,
+}
 
 
 def load_model_preference() -> ModelPreference | None:
@@ -62,12 +66,15 @@ def valid_subagent_settings(value: object) -> bool:
         and isinstance(budget, int)
         and not isinstance(budget, bool)
         and 1 <= budget <= 32
+        and type(value.get("fetch")) is bool
     )
 
 
 def load_subagent_settings() -> SubagentSettings:
     try:
         settings = cast(object, json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
+        if is_record(settings) and "fetch" not in settings:
+            settings["fetch"] = True
     except FileNotFoundError:
         return DEFAULT_SUBAGENT_SETTINGS.copy()
     except (OSError, ValueError):
