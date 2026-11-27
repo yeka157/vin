@@ -7,6 +7,7 @@ import stat
 from email.message import Message
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.error import HTTPError, URLError
@@ -21,6 +22,7 @@ from vin.provider import openrouter
 from vin.tui import app as app_module
 from vin.tui import model_menu as model_menu_module
 from vin.tui.app import VinApp
+from vin.tui.model_menu import MODEL_TABS
 from vin.tui.completion import SessionCompleter
 from vin.tui.constants import is_command
 from vin.types.auth import OpenRouterAccount
@@ -177,6 +179,11 @@ class ModelCommandMethodTests(unittest.IsolatedAsyncioTestCase):
         self.save_list = self.enterContext(patch.object(model_menu_module, "save_openrouter_whitelist"))
         self.save_choice = self.enterContext(patch.object(model_menu_module, "save_model_preference"))
 
+    def pickers(self) -> list[tuple[str, tuple[str, ...], int]]:
+        """(title, tabs, tab) for each picker opened, in order."""
+        return [(str(cast(object, args.args[0])), cast(tuple[str, ...], args.kwargs.get("tabs", ())),
+                 cast(int, args.kwargs.get("tab", 0))) for args in self.pick.await_args_list]
+
     def assert_selection(self, provider: str | None, model: str | None) -> None:
         self.assertEqual((self.vin.selected_provider, self.vin.selected_model), (provider, model))
 
@@ -187,7 +194,8 @@ class ModelCommandMethodTests(unittest.IsolatedAsyncioTestCase):
         self.pick.return_value = [CODER]
         self.assertEqual(await self.vin.change_model(), "Model: OpenRouter · Acme: Coder")
         self.pick.assert_awaited_once_with(
-            "Choose a model", [GPT, CODER], multi=False, action="choose", current=("chatgpt", "gpt"))
+            "Choose a model", [GPT, CODER], multi=False, action="choose", current=("chatgpt", "gpt"),
+            tabs=MODEL_TABS, tab=0)
         self.save_choice.assert_called_once_with("openrouter", "acme/coder")
         self.assert_selection("openrouter", "acme/coder")
         self.assertIsNone(self.vin.last_usage)
@@ -240,10 +248,65 @@ class ModelCommandMethodTests(unittest.IsolatedAsyncioTestCase):
         self.pick.assert_not_awaited()
         self.assertFalse(self.vin.loading_model)
 
-    async def test_openrouter_with_an_empty_list_points_to_add(self) -> None:
+    async def test_openrouter_with_an_empty_list_opens_the_add_tab(self) -> None:
         self.vin.models = []
-        self.assertEqual(await self.vin.change_model(), "No models yet. Use /model add to add an OpenRouter model.")
-        self.pick.assert_not_awaited()
+        self.vin.selected_provider, self.vin.selected_model = "openrouter", None
+        self.pick.side_effect = [[OPUS]]
+        self.assertEqual(await self.vin.change_model(),
+                         "Added OpenRouter · Anthropic: Claude Opus. Model: OpenRouter · Anthropic: Claude Opus")
+        self.assertEqual(self.pickers(), [("Add OpenRouter models", MODEL_TABS, 1)])
+        self.save_list.assert_called_once_with([OPUS])
+
+    async def test_tabs_show_only_when_signed_in_to_openrouter(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.pick.return_value = None
+        _ = await self.vin.change_model()
+        self.vin.openrouter = None
+        self.vin.models = [GPT]
+        _ = await self.vin.change_model()
+        self.assertEqual(self.pickers(), [("Choose a model", MODEL_TABS, 0), ("Choose a model", (), 0)])
+
+    async def test_tab_opens_the_openrouter_catalog_and_adds_the_ticked_models(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.pick.side_effect = [1, [OPUS, GEMINI]]
+
+        outcome = await self.vin.change_model()
+
+        self.assertEqual(self.pickers(), [("Choose a model", MODEL_TABS, 0), ("Add OpenRouter models", MODEL_TABS, 1)])
+        add = self.pick.await_args_list[1]
+        self.assertEqual(add.args[1], [OPUS, GEMINI])
+        self.assertEqual((add.kwargs["multi"], add.kwargs["action"]), (True, "add"))
+        self.catalog.assert_called_once_with()
+        self.save_list.assert_called_once_with([CODER, OPUS, GEMINI])
+        self.assertEqual(outcome, "Added OpenRouter · Anthropic: Claude Opus, Google: Gemini. Use /model to switch.")
+        self.assert_selection("chatgpt", "gpt")
+
+    async def test_tab_back_from_add_returns_to_your_models(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.pick.side_effect = [1, 0, [CODER]]
+
+        self.assertEqual(await self.vin.change_model(), "Model: OpenRouter · Acme: Coder")
+
+        self.assertEqual([(title, tab) for title, _, tab in self.pickers()],
+                         [("Choose a model", 0), ("Add OpenRouter models", 1), ("Choose a model", 0)])
+        self.save_list.assert_not_called()
+        self.assert_selection("openrouter", "acme/coder")
+
+    async def test_escape_in_the_add_tab_closes_without_saving(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.pick.side_effect = [1, None]
+        self.assertIsNone(await self.vin.change_model())
+        self.save_list.assert_not_called()
+        self.assert_selection("chatgpt", "gpt")
+
+    async def test_failed_catalog_in_the_add_tab_is_an_error(self) -> None:
+        self.vin.credentials = fixture_credentials()
+        self.pick.side_effect = [1]
+        self.catalog.side_effect = RuntimeError("Could not load OpenRouter models.")
+        with self.assertRaisesRegex(RuntimeError, "Could not load OpenRouter models."):
+            await self.vin.change_model()
+        self.assertFalse(self.vin.loading_model)
+        self.save_list.assert_not_called()
 
     async def test_signed_out_of_both_cannot_choose(self) -> None:
         self.vin.openrouter = None

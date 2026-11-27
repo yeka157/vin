@@ -237,6 +237,24 @@ class PickerTests(unittest.TestCase):
             picker.search.text = "Model 4"
             self.assertEqual(picker.top, 0)
 
+    def test_tabs_show_in_the_title_line_and_footer(self) -> None:
+        picker = ModelPicker("Choose a model", [OPUS], multi=False, action="choose",
+                             tabs=("Your models", "Add from OpenRouter"), tab=1)
+        line = picker.title_line()
+        self.assertEqual("".join(part[1] for part in line), "  Your models   Add from OpenRouter  ")
+        styles = {part[1].strip(): part[0] for part in line if part[1].strip()}
+        self.assertEqual(styles["Add from OpenRouter"], "fg:#ffffff bg:#303b59 bold")
+        self.assertEqual(styles["Your models"], "class:placeholder")
+        self.assertTrue(picker.footer().endswith(" · Enter choose · Tab switch"))
+
+    def test_without_tabs_tab_does_nothing_and_the_title_stays(self) -> None:
+        picker = ModelPicker("Add", [OPUS], multi=True, action="add")
+        self.assertEqual(picker.title_line(), [("bold", " Add")])
+        self.assertNotIn("Tab", picker.footer())
+        control = picker.search_window.content
+        assert isinstance(control, BufferControl) and control.key_bindings is not None
+        self.assertFalse([b for b in control.key_bindings.get_bindings_for_keys((Keys.ControlI,)) if b.filter()])
+
     def test_tiny_screens_still_show_one_row(self) -> None:
         with screen(rows=9):
             self.assertEqual(ModelPicker("Add", [OPUS, FREE], multi=True, action="add").visible(), 1)
@@ -256,7 +274,7 @@ class PickModelsTests(unittest.IsolatedAsyncioTestCase):
     def press(self, name: str) -> None:
         _ = self.handlers[name](cast(KeyPressEvent, Mock(current_buffer=Mock(), app=Mock())))
 
-    async def open(self, models: list[ModelMetadata], **options: object) -> "asyncio.Task[list[ModelMetadata] | None]":
+    async def open(self, models: list[ModelMetadata], **options: object) -> "asyncio.Task[list[ModelMetadata] | int | None]":
         task = asyncio.create_task(self.vin.pick_models("Add OpenRouter models", models, multi=True, action="add",
                                                         **options))  # pyright: ignore[reportArgumentType]
         async with asyncio.timeout(1):
@@ -297,6 +315,25 @@ class PickModelsTests(unittest.IsolatedAsyncioTestCase):
         self.vin.picker.search.text = ""
         self.press("submit")
         self.assertEqual(await task, [OPUS])
+
+    async def test_tab_and_shift_tab_close_the_picker_with_the_next_tab(self) -> None:
+        tabs = ("Your models", "Add from OpenRouter", "Third")
+        for key, start, expected in ((Keys.ControlI, 0, 1), (Keys.ControlI, 2, 0),
+                                     (Keys.BackTab, 0, 2), (Keys.BackTab, 1, 0)):
+            with self.subTest(key=key, start=start):
+                task = await self.open([OPUS], tabs=tabs, tab=start)
+                try:
+                    picker = self.vin.picker
+                    assert picker is not None
+                    picker.row = 0
+                    picker.checked = {OPUS["slug"]}
+                    PickerTests.press(cast(PickerTests, None), picker, key)
+                    async with asyncio.timeout(1):
+                        self.assertEqual(await task, expected, "a switch is not a choice")
+                    self.assert_closed()
+                finally:
+                    _ = task.cancel()
+                    _ = await asyncio.gather(task, return_exceptions=True)
 
     async def test_a_second_picker_is_refused_while_one_is_open(self) -> None:
         task = await self.open([OPUS])

@@ -111,12 +111,29 @@ async def pick_models(owner: "VinApp",
     action: str,
     current: tuple[str, str] | None = None,
     search: str = "",
-) -> list[ModelMetadata] | None:
+    tabs: tuple[str, ...] = (),
+    tab: int = 0,
+) -> list[ModelMetadata] | int | None:
+    """The chosen models, None on Esc, or with tabs the tab index the user switched to."""
+
+    def close() -> None:
+        if owner.choice_future is not None and not owner.choice_future.done():
+            owner.choice_future.set_result(None)
+
+    picker = ModelPicker(title, models, multi=multi, action=action, current=current,
+                         search=search, tabs=tabs, tab=tab, on_switch=close)
+    if not await open_picker(owner, picker):
+        return None
+    return picker.chosen() if picker.switch_to is None else picker.switch_to
+
+
+MODEL_TABS = ("Your models", "Add from OpenRouter")
+
+
+async def open_picker(owner: "VinApp", picker: ModelPicker) -> bool:
+    """Show the picker until Enter or Tab (True) or Esc (False)."""
     if owner.choice_future is not None:
         raise RuntimeError("A choice is already open")
-    picker = ModelPicker(
-        title, models, multi=multi, action=action, current=current, search=search
-    )
     owner.picker = picker
     owner.choice_menu = picker.container
     owner.choice_future = asyncio.get_running_loop().create_future()
@@ -124,11 +141,11 @@ async def pick_models(owner: "VinApp",
         owner.session.layout.focus(picker.search_window)
         owner.app.invalidate()
         await owner.choice_future
-        return picker.chosen()
+        return True
     except asyncio.CancelledError:
         if task_is_cancelling():
             raise
-        return None
+        return False
     finally:
         owner.picker = None
         owner.choice_menu = None
@@ -154,23 +171,42 @@ async def change_model(owner: "VinApp") -> str | Text | None:
             if models is None:
                 return None
             owner.set_models("chatgpt", models)
-    if not owner.models:
+    tabbed = owner.openrouter is not None
+    if not owner.models and not tabbed:
         return "No models yet. Use /model add to add an OpenRouter model."
-    picked = await owner.pick_models(
-        "Choose a model",
-        owner.models,
-        multi=False,
-        action="choose",
-        current=(owner.selected_provider or "", owner.selected_model or ""),
-    )
-    chosen = picked[0] if picked else None
-    outcome = (
-        None
-        if chosen is None
-        or (chosen["provider"], chosen["slug"])
-        == (owner.selected_provider, owner.selected_model)
-        else owner.select_model(chosen)
-    )
+    tab = 0 if owner.models else 1
+    outcome: str | None = None
+    while True:
+        if tab == 1:
+            added = await add_models(owner, "", tab=1)
+            if isinstance(added, int):
+                tab = added
+                continue
+            outcome = added
+            break
+        if not owner.models:
+            tab = 1
+            continue
+        current = (owner.selected_provider or "", owner.selected_model or "")
+        if tabbed:
+            picked = await owner.pick_models(
+                "Choose a model", owner.models, multi=False, action="choose",
+                current=current, tabs=MODEL_TABS, tab=0,
+            )
+        else:
+            picked = await owner.pick_models(
+                "Choose a model", owner.models, multi=False, action="choose", current=current
+            )
+        if isinstance(picked, int):
+            tab = picked
+            continue
+        chosen = picked[0] if picked else None
+        if chosen is not None and (chosen["provider"], chosen["slug"]) != (
+            owner.selected_provider,
+            owner.selected_model,
+        ):
+            outcome = owner.select_model(chosen)
+        break
     if unavailable is None:
         return outcome
     warning = Text(unavailable, style="red")
@@ -178,6 +214,14 @@ async def change_model(owner: "VinApp") -> str | Text | None:
 
 
 async def add_openrouter_model(owner: "VinApp", query: str) -> str | None:
+    added = await add_models(owner, query)
+    assert not isinstance(added, int), "only the tabbed /model picker switches tabs"
+    return added
+
+
+async def add_models(owner: "VinApp", query: str, *, tab: int | None = None) -> str | int | None:
+    """Pick OpenRouter models to add. With tab, the picker shows the /model tabs and
+    returns the tab index when the user switches."""
     if owner.openrouter is None:
         return "Sign in to OpenRouter with /login before adding a model."
     catalog = await owner.wait_for_models(asyncio.to_thread(list_openrouter_models))
@@ -195,9 +239,17 @@ async def add_openrouter_model(owner: "VinApp", query: str) -> str | None:
     matches = [model for model in catalog if model["slug"] not in added]
     if not matches:
         return "Every OpenRouter model with tool support is already added."
-    picked = await owner.pick_models(
-        "Add OpenRouter models", matches, multi=True, action="add", search=query
-    )
+    if tab is None:
+        picked = await owner.pick_models(
+            "Add OpenRouter models", matches, multi=True, action="add", search=query
+        )
+    else:
+        picked = await owner.pick_models(
+            "Add OpenRouter models", matches, multi=True, action="add", search=query,
+            tabs=MODEL_TABS, tab=tab,
+        )
+    if isinstance(picked, int):
+        return picked
     if not picked:
         return None
     owner.save_whitelist(whitelist + picked)
@@ -217,7 +269,7 @@ async def remove_openrouter_model(owner: "VinApp") -> str | None:
     picked = await owner.pick_models(
         "Remove OpenRouter models", whitelist, multi=True, action="remove"
     )
-    if not picked:
+    if not isinstance(picked, list) or not picked:
         return None
     removed = {m["slug"] for m in picked}
     owner.save_whitelist([m for m in whitelist if m["slug"] not in removed])

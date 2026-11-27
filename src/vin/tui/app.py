@@ -223,9 +223,12 @@ class VinApp:
         action: str,
         current: tuple[str, str] | None = None,
         search: str = "",
-    ) -> list[ModelMetadata] | None:
+        tabs: tuple[str, ...] = (),
+        tab: int = 0,
+    ) -> list[ModelMetadata] | int | None:
         return await model_menu.pick_models(
-            self, title, models, multi=multi, action=action, current=current, search=search
+            self, title, models, multi=multi, action=action, current=current, search=search,
+            tabs=tabs, tab=tab,
         )
 
     async def change_model(self) -> str | Text | None:

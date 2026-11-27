@@ -1,5 +1,7 @@
 """Searchable model list for adding, removing, and choosing models."""
 
+from collections.abc import Callable, Sequence
+
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
 from prompt_toolkit.application.current import get_app
@@ -51,8 +53,15 @@ class ModelPicker:
         action: str,
         current: tuple[str, str] | None = None,
         search: str = "",
+        tabs: Sequence[str] = (),
+        tab: int = 0,
+        on_switch: Callable[[], None] | None = None,
     ) -> None:
         self.title = title
+        self.tabs = tabs
+        self.tab = tab
+        # Set by Tab / Shift+Tab: the tab the caller should open next.
+        self.switch_to: int | None = None
         self.models = models
         self.multi = multi
         self.action = action
@@ -99,6 +108,21 @@ class ModelPicker:
                 self.search.insert_text(event.data)
             event.app.invalidate()
 
+        def switch(step: int) -> None:
+            self.switch_to = (self.tab + step) % len(self.tabs)
+            if on_switch is not None:
+                on_switch()
+
+        has_tabs = Condition(lambda: len(self.tabs) > 1)
+
+        @kb.add("tab", filter=has_tabs, eager=True)
+        def _next_tab(_event: KeyPressEvent) -> None:
+            switch(1)
+
+        @kb.add("s-tab", filter=has_tabs, eager=True)
+        def _previous_tab(_event: KeyPressEvent) -> None:
+            switch(-1)
+
         self.search_window = Window(
             BufferControl(
                 self.search,
@@ -119,7 +143,7 @@ class ModelPicker:
         )
         self.container = HSplit(
             [
-                Window(FormattedTextControl(self.header), height=1, style="bold"),
+                Window(FormattedTextControl(self.title_line), height=1),
                 Frame(self.search_window),
                 Window(
                     FormattedTextControl(self.render),
@@ -199,6 +223,17 @@ class ModelPicker:
         lines.append(rule)
         return lines
 
+    def title_line(self) -> StyleAndTextTuples:
+        if len(self.tabs) < 2:
+            return [("bold", self.header())]
+        line: StyleAndTextTuples = [("", " ")]
+        for index, name in enumerate(self.tabs):
+            style = "fg:#ffffff bg:#303b59 bold" if index == self.tab else "class:placeholder"
+            line += [(style, f" {name} "), ("", " ")]
+        if self.checked:
+            line.append(("bold", f" {len(self.checked)} selected"))
+        return line
+
     def header(self) -> str:
         return f" {self.title}" + (
             f" {len(self.checked)} selected" if self.checked else ""
@@ -209,4 +244,6 @@ class ModelPicker:
         if self.multi:
             text += " · Space select"
         text += f" · Enter {self.action}"
+        if len(self.tabs) > 1:
+            text += " · Tab switch"
         return text
