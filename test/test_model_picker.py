@@ -165,7 +165,8 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(set(top_rule.strip()), {"─"})
         self.assertEqual(top_rule, bottom_rule)
         self.assertEqual(opus.split(), ["○", "Anthropic:", "Claude", "Opus", "1M", "5.00", "25.00",
-                                            "image", "reasoning"])
+                                            "image,", "reasoning"])
+        self.assertTrue(opus.rstrip().endswith("  image, reasoning"))
         self.assertEqual(free.split(), ["○", "Acme:", "Free", "free", "free"])
         self.assertEqual(heading.index("Model"), opus.index("Anthropic"))
         self.assertEqual(heading.index("Context") + len("Context"), opus.index("1M") + len("1M"))

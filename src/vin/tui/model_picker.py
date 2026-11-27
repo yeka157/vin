@@ -192,7 +192,7 @@ class ModelPicker:
             input_price, output_price = price_labels(model)
             line = (
                 f"{pointer}{mark} {name:<{name_width}}  {context_label(model):>7}  "
-                f"{input_price:>7}  {output_price:>8}  {' '.join(model.get('features', []))}"
+                f"{input_price:>7}  {output_price:>8}  {', '.join(model.get('features', []))}"
             )
             style = "fg:#ffffff bg:#303b59 bold" if index == self.row else ""
             lines.append((style, line[: width - 1] + "\n"))
