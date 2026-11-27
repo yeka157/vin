@@ -241,10 +241,12 @@ class PickerTests(unittest.TestCase):
         picker = ModelPicker("Choose a model", [OPUS], multi=False, action="choose",
                              tabs=("Your models", "Add from OpenRouter"), tab=1)
         line = picker.title_line()
-        self.assertEqual("".join(part[1] for part in line), "  Your models   Add from OpenRouter  ")
+        self.assertEqual("".join(part[1] for part in line), " Model   Your models   Add from OpenRouter  ")
         styles = {part[1].strip(): part[0] for part in line if part[1].strip()}
-        self.assertEqual(styles["Add from OpenRouter"], "fg:#ffffff bg:#303b59 bold")
-        self.assertEqual(styles["Your models"], "class:placeholder")
+        self.assertEqual(styles["Model"], "fg:#8fa8ff bold")
+        self.assertEqual(styles["Add from OpenRouter"], "bg:#ffffff fg:#000000 bold")
+        self.assertEqual(styles["Your models"], "")
+        self.assertFalse(any("underline" in part[0] for part in line))
         self.assertTrue(picker.footer().endswith(" · Enter choose · Tab switch"))
 
     def tabbed(self, switched: list[int] | None = None) -> ModelPicker:
@@ -273,8 +275,9 @@ class PickerTests(unittest.TestCase):
         self.assertTrue(picker.tab_focus)
         self.assertEqual(picker.footer(), "   ←→ switch tab · ↓ search")
         self.assertEqual(picker.chosen(), [], "Enter on the tab row picks nothing")
-        styles = [part[0] for part in picker.title_line() if part[1].strip() == "Your models"]
-        self.assertEqual(styles, ["fg:#ffffff bg:#5868a8 bold underline"])
+        styles = {part[1].strip(): part[0] for part in picker.title_line() if part[1].strip()}
+        self.assertEqual(styles["Your models"], "bg:#8fa8ff fg:#000000 bold")
+        self.assertEqual(styles["Add from OpenRouter"], "bold")
         self.press(picker, "up")
         self.assertTrue(picker.tab_focus, "Up on the tab row stays there")
         self.press(picker, "down")

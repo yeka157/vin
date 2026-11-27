@@ -248,11 +248,14 @@ class ModelPicker:
     def title_line(self) -> StyleAndTextTuples:
         if len(self.tabs) < 2:
             return [("bold", self.header())]
-        line: StyleAndTextTuples = [("", " ")]
-        active = "fg:#ffffff bg:#5868a8 bold underline" if self.tab_focus else "fg:#ffffff bg:#303b59 bold"
+        # Like Claude Code's settings tabs: periwinkle while the tab row has focus, white otherwise.
+        if self.tab_focus:
+            active, other = "bg:#8fa8ff fg:#000000 bold", "bold"
+        else:
+            active, other = "bg:#ffffff fg:#000000 bold", ""
+        line: StyleAndTextTuples = [("", " "), ("fg:#8fa8ff bold", "Model"), ("", "  ")]
         for index, name in enumerate(self.tabs):
-            style = active if index == self.tab else "class:placeholder"
-            line += [(style, f" {name} "), ("", " ")]
+            line += [(active if index == self.tab else other, f" {name} "), ("", " ")]
         if self.checked:
             line.append(("bold", f" {len(self.checked)} selected"))
         return line
