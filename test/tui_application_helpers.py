@@ -21,7 +21,8 @@ from rich.console import Console
 from typing import TextIO
 
 from vin.settings import DEFAULT_SETTINGS
-from vin.tui import bindings, layout, transcript as transcript_ui
+from vin.tui import accounts, bindings, conversations, layout, menus, model_menu, settings_menu, subagents, turns
+from vin.tui import app as app_module, transcript as transcript_ui
 from vin.tui.app import VinApp
 from vin.types.auth import Credentials
 from vin.types.transcript import TranscriptEntry
@@ -61,6 +62,25 @@ class ConsoleArguments(TypedDict, total=False):
     no_color: bool
 
 
+TUI_MODULES: tuple[ModuleType, ...] = (app_module, accounts, menus, model_menu, settings_menu, turns, conversations,
+                                       subagents, layout, bindings, transcript_ui)
+
+
+@contextmanager
+def patch_app(*, create: bool = False, **replacements: object) -> Generator[None]:
+    """Replace each name in every vin.tui module that uses it; VinApp's code is split across them."""
+    with ExitStack() as stack:
+        for name, value in replacements.items():
+            owners = [module for module in TUI_MODULES if hasattr(module, name)]
+            if not owners and create:
+                owners = [app_module]
+            if not owners:
+                raise AttributeError(f"No vin.tui module has {name!r}")
+            for owner in owners:
+                stack.enter_context(patch.object(owner, name, value, create=create))
+        yield
+
+
 @contextmanager
 def patch_tui(module: ModuleType, *, create: bool = False, **replacements: object) -> Generator[None]:
     owners = {"PromptSession": layout, "Application": layout, "Console": transcript_ui}
@@ -71,18 +91,17 @@ def patch_tui(module: ModuleType, *, create: bool = False, **replacements: objec
                     "load_settings": Mock(side_effect=lambda: DEFAULT_SETTINGS.copy())} | replacements
     with ExitStack() as stack:
         for name, value in replacements.items():
-            stack.enter_context(patch.object(owners.get(name, module), name, value, create=create))
+            if name in owners or module is not app_module:
+                stack.enter_context(patch.object(owners.get(name, module), name, value, create=create))
+            else:
+                stack.enter_context(patch_app(create=create, **{name: value}))
         yield
 
 
 @contextmanager
 def patch_ui_clock(*, return_value: float | None = None, side_effect: list[float] | None = None) -> Generator[Mock]:
     clock = Mock(return_value=return_value, side_effect=side_effect)
-    with ExitStack() as stack:
-        for module in (layout, bindings):
-            stack.enter_context(patch.object(module, "monotonic", clock))
-        from vin.tui import app
-        stack.enter_context(patch.object(app, "monotonic", clock))
+    with patch_app(monotonic=clock):
         yield clock
 
 

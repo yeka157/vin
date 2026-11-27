@@ -29,6 +29,7 @@ from vin.types.events import ReplyEvent, ToolStarted
 from vin.sessions import storage
 from vin.sessions.records import new_session
 from vin.tui import app as app_module, bindings, layout, subagents, transcript
+from vin.tui import turns as turns_module
 from vin.tui.app import VinApp
 from vin.tui.layout import build_workspace
 from vin.types.auth import Credentials
@@ -55,7 +56,7 @@ class SubagentTranscriptTests(unittest.IsolatedAsyncioTestCase):
         self.owner.session = PromptSession(input=DummyInput(), output=DummyOutput())
         self.owner.session.default_buffer = Buffer(document=Document("draft"))
         self.now = 100.0
-        for module in (app_module, bindings, layout, transcript, subagents):
+        for module in (app_module, turns_module, bindings, layout, transcript, subagents):
             self.enterContext(patch.object(module, "monotonic", side_effect=lambda: self.now, create=True))
 
     async def wait_until(self, predicate: Callable[[], bool]) -> None:
@@ -76,7 +77,7 @@ class SubagentTranscriptTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 stopped.set()
 
-        self.stream = self.enterContext(patch.object(app_module, "stream_chatgpt_response", side_effect=worker))
+        self.stream = self.enterContext(patch.object(turns_module, "stream_chatgpt_response", side_effect=worker))
         self.owner.transcript.append({"role": "user", "content": "Delegate it."})
         task = asyncio.create_task(self.owner.stream_reply("Delegate it."))
         self.owner.pending_reply = task

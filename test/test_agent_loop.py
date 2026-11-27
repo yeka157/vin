@@ -479,7 +479,7 @@ class AgentHistoryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         def reuse_credentials(saved: Credentials) -> Credentials:
             return saved
-        self.enterContext(patch("vin.tui.app.refresh_credentials", side_effect=reuse_credentials))
+        self.enterContext(patch("vin.tui.accounts.refresh_credentials", side_effect=reuse_credentials))
         self.owner = tui.VinApp()
         self.owner.credentials = fixture_credentials(TOKEN)
         self.owner.selected_model = 'selected-model'

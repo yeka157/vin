@@ -11,7 +11,7 @@ Vin is a terminal coding agent in Python: a prompt-toolkit/Rich TUI, ChatGPT sig
 - `src/vin/tools.py`: the four tools and `TOOL_REGISTRY`.
 - `src/vin/settings.py`: everything `/settings` changes, saved in one flat `settings.json`. Secrets keep their own files (`auth/`).
 - `src/vin/types/`: every named type (TypedDicts, `type` aliases, Protocols), one module per area: `data` (JSON values and guards), `history`, `models`, `auth`, `transcript`, `sessions`, `settings`, `events`, `agent` (the provider contract), `chatgpt` (the Responses client shape). Import from the owning module; `vin.types` itself exports nothing. A new type goes in the module for its area, or a new module when it starts a new area. These modules import only the standard library, Rich and each other, so anything can use them without an import cycle.
-- `src/vin/tui/`: the app (`app.py` holds `VinApp`, `stream_reply` and the command receiver), key bindings, layout and transcript rendering.
+- `src/vin/tui/`: the terminal app. `app.py` holds `VinApp` (state, the input loop and commands) and one-line methods that call the area modules: `turns.py` (running a turn), `model_menu.py`, `settings_menu.py`, `accounts.py`, `menus.py` (inline menus and prompts), `conversations.py` (resume/rename). Also key bindings, layout and transcript rendering. Area modules take the app as `owner: "VinApp"`. Tests patch a dependency where it is used; `patch_app` in `test/tui_application_helpers.py` patches a name in every `vin.tui` module that has it.
 - `src/vin/sessions/`: saving and resuming conversations.
 - `test/`: offline `unittest` suite. `*_helpers.py` hold shared fixtures and typed helpers.
 

@@ -23,6 +23,9 @@ from vin.auth import chatgpt, chatgpt as auth
 from vin.auth.credentials import load_credential_record, save_private_json
 from vin.provider.events import ReplyEvents
 from vin.tui import app as tui
+from vin.tui import accounts as accounts_module
+from vin.tui import model_menu as model_menu_module
+from vin.tui import turns as turns_module
 from vin.tui.app import VinApp
 from vin.types.auth import Credentials, Identity, Registration
 from vin.types.data import JSONValue
@@ -253,7 +256,7 @@ class CredentialStorageTests(unittest.TestCase):
 
         app = VinApp()
         app.credentials = loaded
-        with patch("vin.tui.app.refresh_credentials") as refresh:
+        with patch("vin.tui.accounts.refresh_credentials") as refresh:
             self.assertIs(asyncio.run(app.prepare_request_credentials()), loaded)
         refresh.assert_not_called()
         self.assertIs(app.credentials, loaded)
@@ -478,7 +481,7 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
             self.seen.append(credentials)
             events.put(("text", "Done"))
             events.put(("complete", None))
-        self.worker = self.enterContext(patch.object(tui, "stream_chatgpt_response", side_effect=worker))
+        self.worker = self.enterContext(patch.object(turns_module, "stream_chatgpt_response", side_effect=worker))
 
     def start(self, text: str = "Inspect") -> ReplyTask:
         task = asyncio.create_task(self.owner.stream_reply(text))
@@ -513,7 +516,7 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
             events.put(("complete", None))
         self.owner.selected_provider = "openrouter"
         self.owner.openrouter = {"key": "sk-or-secret", "label": "test"}
-        with patch.object(tui, "stream_openrouter_response", side_effect=worker):
+        with patch.object(turns_module, "stream_openrouter_response", side_effect=worker):
             await asyncio.wait_for(self.start(), 2)
         self.assertEqual(seen, [{"key": "sk-or-secret", "label": "test"}])
         self.assertIsNot(seen[0], self.owner.openrouter)
@@ -554,8 +557,8 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.exchange.side_effect = exchange
         tasks: list[PendingTask] = []
         with (
-            patch.object(tui, "list_chatgpt_models", return_value=[]) as catalog,
-            patch.object(tui, "save_cached_chatgpt_models") as cache,
+            patch.object(model_menu_module, "list_chatgpt_models", return_value=[]) as catalog,
+            patch.object(model_menu_module, "save_cached_chatgpt_models") as cache,
         ):
             try:
                 discovery = asyncio.create_task(self.owner.discover_chatgpt_models())
@@ -629,7 +632,7 @@ class RequestCredentialsTests(unittest.IsolatedAsyncioTestCase):
             result.pop("id_token", None)
             return result
         tasks: list[PendingTask] = []
-        with patch.object(tui, "logout_chatgpt", side_effect=logout) as sign_out:
+        with patch.object(accounts_module, "logout_chatgpt", side_effect=logout) as sign_out:
             try:
                 turn = self.start()
                 tasks.append(turn)

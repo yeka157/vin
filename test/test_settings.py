@@ -14,10 +14,11 @@ from urllib.request import Request
 
 from rich.text import Text
 
+from tui_application_helpers import patch_app
 from provider_typing_helpers import credentials as fixture_credentials
 from vin import settings as settings_module
 from vin.provider import preferences
-from vin.tui import app as app_module
+from vin.tui import settings_menu as settings_menu_module
 from vin.tui.app import VinApp
 from vin.auth import search
 from vin.types.settings import Settings, SettingsChange
@@ -195,7 +196,7 @@ class SettingsCommandTests(unittest.TestCase):
         self.inline = AsyncMock()
         self.save = Mock()
         self.enterContext(patch.object(self.app, "choose_inline", self.inline))
-        self.enterContext(patch.object(app_module, "save_settings", self.save))
+        self.enterContext(patch.object(settings_menu_module, "save_settings", self.save))
 
     def test_settings_opens_a_menu_per_topic(self) -> None:
         self.inline.side_effect = ["subagents", asyncio.CancelledError()]
@@ -275,7 +276,7 @@ class SettingsCommandTests(unittest.TestCase):
 
     def test_bad_settings_file_shows_a_notice_and_keeps_defaults(self) -> None:
         self.app.credentials = fixture_credentials("token")
-        with patch.multiple(app_module, create=True,
+        with patch_app(create=True,
                             load_settings=Mock(side_effect=RuntimeError("Saved settings are invalid.")),
                             load_model_preference=Mock(return_value={"provider": "chatgpt", "model": "m"}),
                             load_cached_chatgpt_models=Mock(return_value=[])):
@@ -374,7 +375,7 @@ class SearchSettingsCommandTests(unittest.TestCase):
         self.enterContext(patch.object(self.app, "choose_inline", self.inline))
         self.enterContext(patch.object(self.app, "ask_secret", self.secret))
         self.enterContext(patch.object(self.app, "app", Mock(), create=True))
-        self.enterContext(patch.multiple(app_module, check_search_key=self.check,
+        self.enterContext(patch_app(check_search_key=self.check,
                                          save_search_key=self.save_key,
                                          delete_search_key=self.delete_key,
                                          save_settings=self.save))
@@ -526,7 +527,7 @@ class SearchSettingsCommandTests(unittest.TestCase):
             "load_cached_chatgpt_models": Mock(return_value=[]),
             "load_openrouter_account": Mock(return_value=None),
         }
-        with patch.multiple(app_module, create=True, load_search_key=Mock(return_value=KEY), **common):
+        with patch_app(create=True, load_search_key=Mock(return_value=KEY), **common):
             asyncio.run(self.app.initialize_session())
         self.assertEqual((self.app.search_key, self.app.settings), (KEY, ON))
         self.assertEqual(self.app.transcript, [])
@@ -534,7 +535,7 @@ class SearchSettingsCommandTests(unittest.TestCase):
         app = VinApp()
         app.credentials = fixture_credentials("token")
         bad = Mock(side_effect=RuntimeError("Saved web search key is invalid."))
-        with patch.multiple(app_module, create=True, load_search_key=bad, **common):
+        with patch_app(create=True, load_search_key=bad, **common):
             asyncio.run(app.initialize_session())
         entry, = app.transcript
         self.assertEqual(str(entry["content"]), "Saved web search key is invalid.")

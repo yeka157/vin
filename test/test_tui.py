@@ -1,5 +1,7 @@
 import asyncio
 import vin.tui.app as vin
+from vin.tui import accounts as accounts_module
+from vin.tui import turns as turns_module
 from vin import main as entrypoint
 from vin.tui import transcript as transcript_ui
 from contextlib import nullcontext, redirect_stdout
@@ -34,10 +36,11 @@ from vin.types.transcript import TranscriptEntry
 from vin.sessions.transcript import decode_transcript
 from vin.provider.events import ReplyEvents
 from vin.types.events import TokenUsage
-from prompt_toolkit.layout.controls import UIContent
+from prompt_toolkit.layout.controls import FormattedTextControl, UIContent
 from session_typing_helpers import present, text_value, validated_transcript
 from tui_typing_helpers import key_event
 from tui_application_helpers import (
+    patch_app,
     configure_test_session, console_factory, create_test_application,
     fixture_credentials, loading_container, loading_control, mock_prompt, mock_run,
     patch_tui, patch_ui_clock, session_bindings, transcript_entries,
@@ -190,7 +193,7 @@ class TranscriptLayoutTests(unittest.IsolatedAsyncioTestCase):
 
 class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.enterContext(patch.object(vin, "refresh_credentials", side_effect=preserve_credentials))
+        self.enterContext(patch.object(accounts_module, "refresh_credentials", side_effect=preserve_credentials))
         self.owner = vin.VinApp()
         self.owner.credentials = fixture_credentials("fake-access-token")
         self.owner.selected_model = "selected-model"
@@ -242,7 +245,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
             events.put(("text", "lo**"))
             events.put(("complete", None))
 
-        with patch.object(vin, "stream_chatgpt_response", side_effect=worker, create=True):
+        with patch.object(turns_module, "stream_chatgpt_response", side_effect=worker, create=True):
             task = self.start_reply("Next question")
             try:
                 await self.wait_until(lambda: bool(self.owner.transcript))
@@ -305,7 +308,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
                     events.put((event_kind, message))
 
                 with (
-                    patch.object(vin, "stream_chatgpt_response", side_effect=worker, create=True),
+                    patch.object(turns_module, "stream_chatgpt_response", side_effect=worker, create=True),
                     patch_ui_clock(side_effect=[100.0, 103.75]),
                 ):
                     outcome = await asyncio.wait_for(self.start_reply("Next question"), timeout=2)
@@ -353,7 +356,7 @@ class StreamingReplyTests(unittest.IsolatedAsyncioTestCase):
                 events.put(("complete", None))
 
         tasks: list[asyncio.Task[Literal["error", "rate_limit"] | None]] = []
-        with patch.object(vin, "stream_chatgpt_response", side_effect=worker, create=True):
+        with patch.object(turns_module, "stream_chatgpt_response", side_effect=worker, create=True):
             old = self.start_reply("Cancelled question")
             tasks.append(old)
             try:
@@ -499,8 +502,7 @@ class InitialModelTests(unittest.TestCase):
         self.save = Mock()
         self.cache_save = Mock()
         self.inline = AsyncMock(return_value="new-model")
-        replacements = patch.multiple(
-            vin,
+        replacements = patch_app(
             create=True,
             refresh_credentials=self.refresh,
             list_chatgpt_models=self.catalog,
@@ -508,8 +510,7 @@ class InitialModelTests(unittest.TestCase):
             save_model_preference=self.save,
             save_cached_chatgpt_models=self.cache_save,
         )
-        replacements.start()
-        self.addCleanup(replacements.stop)
+        self.enterContext(replacements)
         picker = patch.object(self.app, "choose_inline", self.inline)
         picker.start()
         self.addCleanup(picker.stop)
@@ -638,7 +639,7 @@ class ModelCommandTests(unittest.TestCase):
     def assert_model_indicator(self, expected: str) -> None:
         visible_text: list[str] = []
         for window in self.session.layout.find_all_windows():
-            if isinstance(window.content, vin.FormattedTextControl):
+            if isinstance(window.content, FormattedTextControl):
                 rendered = window.content.create_content(80, 1)
                 visible_text.append(
                     "".join(fragment[1] for fragment in rendered.get_line(0)).rstrip()
@@ -800,7 +801,7 @@ class ModelCommandTests(unittest.TestCase):
                     self.assertEqual(owner.messages, expected_history)
                     return "/quit"
 
-                with patch.object(vin, "stream_chatgpt_response", side_effect=worker):
+                with patch.object(turns_module, "stream_chatgpt_response", side_effect=worker):
                     try:
                         self.run_chat(read)
                     finally:
@@ -1528,7 +1529,7 @@ class InterruptAndExitKeyTests(unittest.TestCase):
             return self.now
 
         self.enterContext(patch("vin.tui.bindings.monotonic", side_effect=clock))
-        self.enterContext(patch.object(vin, "monotonic", side_effect=clock))
+        self.enterContext(patch_app(monotonic=Mock(side_effect=clock)))
 
     def press(self, name: str) -> None:
         event = cast(KeyPressEvent, Mock(current_buffer=self.buffer, app=Mock(exit=self.exit)))

@@ -24,7 +24,8 @@ from vin.types.events import TokenUsage
 from vin.sessions import storage
 from vin.sessions.records import new_session, snapshot_session
 from vin.sessions.transcript import encode_transcript
-from vin.tui import app, conversations
+from vin.tui import conversations
+from vin.tui import turns as turns_module
 from vin.tui.app import VinApp
 from vin.tui.completion import SessionCompleter
 from vin.tui.layout import build_workspace
@@ -182,7 +183,7 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         self.owner.credentials = credentials
         self.owner.transcript_control.top_line = 12
 
-        with patch.object(app, "stream_chatgpt_response", side_effect=AssertionError("Resume must not run a provider")):
+        with patch.object(turns_module, "stream_chatgpt_response", side_effect=AssertionError("Resume must not run a provider")):
             await self.resume()
 
         self.assertEqual(self.owner.messages, record["messages"])
@@ -218,7 +219,7 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         path = storage.session_path(self.project, record["id"])
         original_bytes = path.read_bytes()
 
-        with patch.object(app, "stream_chatgpt_response", side_effect=AssertionError("Resume must not run a provider")):
+        with patch.object(turns_module, "stream_chatgpt_response", side_effect=AssertionError("Resume must not run a provider")):
             await self.resume()
 
         self.assertIsNone(self.owner.active_turn)
@@ -259,7 +260,7 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         self.picker.return_value = record["id"]
         self.owner.viewed, self.owner.panel_index = "stale", 1
 
-        with patch.object(app, "stream_chatgpt_response", side_effect=AssertionError("Resume must not run a provider")):
+        with patch.object(turns_module, "stream_chatgpt_response", side_effect=AssertionError("Resume must not run a provider")):
             await self.resume()
 
         self.assertEqual((self.owner.panel_start, self.owner.viewed, self.owner.panel_index), (2, None, None))
@@ -283,7 +284,7 @@ class SessionResumeCommandTests(unittest.IsolatedAsyncioTestCase):
         self.owner.subagents = [{"id": "stale", "description": "x", "status": "finished", "started_at": 0.0,
                                  "duration": 1.0, "tokens": 0, "transcript": []}]
 
-        with patch.object(app, "stream_chatgpt_response", side_effect=AssertionError("Resume must not run a provider")):
+        with patch.object(turns_module, "stream_chatgpt_response", side_effect=AssertionError("Resume must not run a provider")):
             await self.resume()
 
         self.assertEqual(self.owner.subagents, [])

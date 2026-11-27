@@ -29,13 +29,17 @@ from rich.text import Text
 from vin.auth import openrouter
 from vin.settings import DEFAULT_SETTINGS
 from vin.tui import app as app_module
-from vin.tui.app import VinApp, get_chatgpt_model_preference
+from vin.tui import accounts as accounts_module
+from vin.tui import menus as menus_module
+from vin.tui import model_menu as model_menu_module
+from vin.tui.app import VinApp
+from vin.tui.model_menu import get_chatgpt_model_preference
 from vin.tui.bindings import create_bindings
 from vin.tui.layout import build_workspace
 from vin.types.auth import OpenRouterAccount
 from vin.types.models import ModelMetadata
 from vin.types.transcript import TranscriptEntry
-from tui_application_helpers import fixture_credentials, fixture_registration
+from tui_application_helpers import fixture_credentials, fixture_registration, patch_app
 
 KEY = "sk-or-v1-secret"
 ACCOUNT: OpenRouterAccount = {"key": KEY, "label": "laptop"}
@@ -207,7 +211,7 @@ class SecretInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_field_shows_only_the_start_and_end_of_the_key(self) -> None:
         task, field = await self.open_field()
         assert isinstance(field.content, BufferControl)
-        mask = next(p for p in field.content.input_processors or [] if isinstance(p, app_module.MaskKey))
+        mask = next(p for p in field.content.input_processors or [] if isinstance(p, menus_module.MaskKey))
         key = "sk-or-v1-0123456789abcdef1c96"
         for typed, shown in ((key, "sk-or-v1-" + "•" * (len(key) - 13) + "1c96"),
                              ("sk-or-v1-abc", "•" * 12), ("", "")):
@@ -246,12 +250,12 @@ class SignInTests(unittest.IsolatedAsyncioTestCase):
         self.vin.app = Mock()
         self.vin.models = [CHATGPT_MODEL]
         self.ask = self.enterContext(patch.object(self.vin, "ask_secret", AsyncMock(return_value=KEY)))
-        self.check = self.enterContext(patch.object(app_module, "check_openrouter_key", return_value=ACCOUNT))
-        self.save = self.enterContext(patch.object(app_module, "save_openrouter_account"))
-        self.whitelist = self.enterContext(patch.object(app_module, "load_openrouter_whitelist", return_value=[]))
+        self.check = self.enterContext(patch.object(accounts_module, "check_openrouter_key", return_value=ACCOUNT))
+        self.save = self.enterContext(patch.object(accounts_module, "save_openrouter_account"))
+        self.whitelist = self.enterContext(patch.object(accounts_module, "load_openrouter_whitelist", return_value=[]))
         self.add = self.enterContext(patch.object(self.vin, "add_openrouter_model", AsyncMock(return_value=None)))
         self.change = self.enterContext(patch.object(self.vin, "change_model", AsyncMock(return_value=None)))
-        self.save_choice = self.enterContext(patch.object(app_module, "save_model_preference"))
+        self.save_choice = self.enterContext(patch.object(model_menu_module, "save_model_preference"))
 
     async def test_valid_key_is_saved_and_the_current_model_is_kept(self) -> None:
         self.vin.credentials = fixture_credentials()
@@ -372,7 +376,7 @@ class SignOutTests(unittest.IsolatedAsyncioTestCase):
         self.vin.app = Mock()
         self.vin.openrouter = ACCOUNT
         self.vin.models = [CHATGPT_MODEL, OPENROUTER_MODEL]
-        self.delete = self.enterContext(patch.object(app_module, "delete_openrouter_account"))
+        self.delete = self.enterContext(patch.object(accounts_module, "delete_openrouter_account"))
         self.load_initial = self.enterContext(patch.object(self.vin, "load_initial_model", AsyncMock()))
 
     async def test_openrouter_logout_switches_to_a_signed_in_chatgpt(self) -> None:
@@ -412,7 +416,7 @@ class SignOutTests(unittest.IsolatedAsyncioTestCase):
         self.vin.credentials = fixture_credentials()
         self.vin.selected_provider, self.vin.selected_model = "chatgpt", "gpt"
 
-        with patch.object(app_module, "logout_chatgpt", return_value=fixture_registration()):
+        with patch.object(accounts_module, "logout_chatgpt", return_value=fixture_registration()):
             await self.vin.run_auth_command("/logout")
 
         self.delete.assert_not_called()
@@ -424,7 +428,7 @@ class SignOutTests(unittest.IsolatedAsyncioTestCase):
         self.vin.credentials = fixture_credentials()
         self.vin.selected_provider, self.vin.selected_model = "openrouter", "acme/coder"
 
-        with patch.object(app_module, "logout_chatgpt", return_value=fixture_registration()):
+        with patch.object(accounts_module, "logout_chatgpt", return_value=fixture_registration()):
             await self.vin.sign_out(announce=False)
 
         self.assertEqual((self.vin.selected_provider, self.vin.selected_model), ("openrouter", "acme/coder"))
@@ -440,8 +444,8 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         self.session = Mock(return_value=None)
         self.inline = self.enterContext(patch.object(self.vin, "choose_inline", AsyncMock(return_value="openrouter")))
         self.enterContext(patch.object(self.vin, "sign_in_openrouter", AsyncMock()))
-        self.enterContext(patch.multiple(
-            app_module, load_openrouter_account=self.account, load_model_preference=self.preference,
+        self.enterContext(patch_app(
+            load_openrouter_account=self.account, load_model_preference=self.preference,
             load_active_session=self.session, load_cached_chatgpt_models=Mock(return_value=[CHATGPT_MODEL]),
             load_openrouter_whitelist=Mock(return_value=[OPENROUTER_MODEL]),
             load_search_key=Mock(return_value=None), load_settings=Mock(side_effect=lambda: DEFAULT_SETTINGS.copy())))
@@ -530,7 +534,7 @@ class AccountDisplayTests(unittest.TestCase):
 
     def test_saved_openrouter_choice_is_not_a_missing_chatgpt_model(self) -> None:
         transcript: list[TranscriptEntry] = []
-        with patch.object(app_module, "load_model_preference",
+        with patch.object(model_menu_module, "load_model_preference",
                           return_value={"provider": "openrouter", "model": "acme/coder"}):
             self.assertIsNone(get_chatgpt_model_preference(transcript, [CHATGPT_MODEL]))
         self.assertEqual(transcript, [])

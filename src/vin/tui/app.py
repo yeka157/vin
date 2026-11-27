@@ -1,215 +1,53 @@
-"""Application state, conversation flow, commands, and account/model setup."""
+"""VinApp: the application state, the input loop and commands.
+
+Each area's code lives in its own module (menus, settings_menu, accounts, model_menu, turns,
+conversations); VinApp keeps a one-line method per action so key bindings, the layout and
+tests reach everything through the app.
+"""
 
 import asyncio
 from collections import deque
-from queue import Empty
-from threading import Event, Thread
-from time import monotonic
-from datetime import datetime
-from pathlib import Path
-from typing import Literal, Unpack
 from collections.abc import Coroutine, Sequence
+from pathlib import Path
+from threading import Event
+from time import monotonic
+from typing import Literal, Unpack
 
 from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.formatted_text import fragment_list_to_text
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.key_binding.key_processor import KeyPressEvent
-from prompt_toolkit.layout import BufferControl, Container, HSplit, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.dimension import Dimension
-from prompt_toolkit.layout.processors import (
-    BeforeInput,
-    Processor,
-    Transformation,
-    TransformationInput,
-)
+from prompt_toolkit.layout import Container, Window
 from prompt_toolkit.patch_stdout import patch_stdout
-from prompt_toolkit.shortcuts import choice
 from prompt_toolkit.widgets import RadioList
-from rich.markdown import Markdown
 from rich.console import RenderableType
-from rich.padding import Padding
+from rich.markdown import Markdown
 from rich.text import Text
 
-from vin.agent import close_open_calls, is_summary
-from vin.auth.chatgpt import (
-    TokenExchangeError,
-    login_with_chatgpt,
-    logout_chatgpt,
-    refresh_credentials,
-)
+from vin.auth.chatgpt import login_with_chatgpt
 from vin.auth.credentials import load_active_session
 from vin.auth.openrouter import (
-    check_openrouter_key,
-    delete_openrouter_account,
     load_openrouter_account,
     mask_key,
-    save_openrouter_account,
 )
-from vin.auth.search import (
-    check_search_key,
-    delete_search_key,
-    load_search_key,
-    save_search_key,
-)
-from vin.provider.chatgpt import list_chatgpt_models, stream_chatgpt_response
-from vin.provider.openrouter import (
-    list_openrouter_models,
-    load_openrouter_whitelist,
-    save_openrouter_whitelist,
-    stream_openrouter_response,
-)
-from vin.provider.model_cache import (
-    load_cached_chatgpt_models,
-    save_cached_chatgpt_models,
-)
-from vin.provider.preferences import load_model_preference, save_model_preference
+from vin.auth.search import load_search_key
+from vin.provider.model_cache import load_cached_chatgpt_models
+from vin.provider.openrouter import load_openrouter_whitelist
+from vin.provider.preferences import load_model_preference
 from vin.sessions.records import new_session
-from vin.settings import DEFAULT_SETTINGS, load_settings, save_settings
+from vin.settings import DEFAULT_SETTINGS, load_settings
 from vin.tools import LAUNCH_DIR
-from vin.tui import conversations
+from vin.tui import accounts, conversations, menus, model_menu, settings_menu, turns
 from vin.tui.constants import PROVIDER_LABELS, is_command
 from vin.tui.layout import build_workspace
+from vin.tui.menus import task_is_cancelling
 from vin.tui.model_picker import ModelPicker
-from vin.tui.subagents import apply_subagent_event, finish_subagent
-from vin.tui.transcript import TranscriptControl, format_duration, render_transcript
-from vin.provider.events import ReplyEvents
+from vin.tui.transcript import TranscriptControl, format_duration
+from vin.types.auth import AccountRecord, Credentials, OpenRouterAccount
 from vin.types.events import TokenUsage
-from vin.types.auth import AccountRecord, Credentials, OpenRouterAccount, Registration
 from vin.types.history import History
-from vin.types.models import Provider, ModelMetadata, ModelPreference
+from vin.types.models import ModelMetadata, Provider
 from vin.types.sessions import ActiveTurn, SessionRecord
-from vin.types.settings import ReplyOptions, Settings, SettingsChange
-from vin.types.transcript import AssistantEntry, Subagent, ToolEntry, TranscriptEntry
-
-
-def _task_is_cancelling() -> bool:
-    task = asyncio.current_task()
-    return task is not None and bool(task.cancelling())
-
-
-class MaskKey(Processor):
-    def apply_transformation(
-        self, transformation_input: TransformationInput
-    ) -> Transformation:
-        text = fragment_list_to_text(transformation_input.fragments)
-        return Transformation([("", mask_key(text, max(len(text) - 13, 0)))])
-
-
-def create_choice_menu(
-    message: str,
-    options: Sequence[tuple[str, str]],
-    default: str | None = None,
-) -> tuple[RadioList[str], HSplit]:
-    if not options:
-        raise RuntimeError("No choices are available.")
-
-    choices: RadioList[str] = RadioList(
-        values=options,
-        default=default,
-        select_on_focus=True,
-        show_numbers=False,
-        open_character="",
-        select_character="❯",
-        close_character="",
-        show_cursor=False,
-        show_scrollbar=False,
-        container_style="class:completion-menu.completion",
-        default_style="",
-        selected_style="fg:#8fa8ff bold",
-        checked_style="class:completion-menu.completion.current",
-        number_style="",
-    )
-
-    container = HSplit(
-        [
-            Window(FormattedTextControl(f" {message}"), height=1),
-            choices,
-        ],
-        height=Dimension(max=6),
-    )
-
-    return choices, container
-
-
-def setting_row(label: str, value: str) -> str:
-    return f"{label:<20}{value}"
-
-
-def choose_login_method() -> str:
-    bindings = KeyBindings()
-
-    @bindings.add("c-d")
-    def exit_menu(event: KeyPressEvent) -> None:
-        event.app.exit(exception=EOFError())
-
-    return choice(
-        message="Sign in to Vin",
-        options=[("chatgpt", "Sign in with ChatGPT")],
-        symbol="❯",
-        key_bindings=bindings,
-    )
-
-
-def choose_chatgpt_model(models: Sequence[ModelMetadata]) -> str:
-    if not models:
-        raise RuntimeError("No ChatGPT models are available for this account.")
-
-    bindings = KeyBindings()
-
-    @bindings.add("c-d")
-    def exit_menu(event: KeyPressEvent) -> None:
-        event.app.exit(exception=EOFError())
-
-    return choice(
-        message="Choose a ChatGPT model",
-        options=[(model["slug"], model["display_name"]) for model in models],
-        symbol="❯",
-        key_bindings=bindings,
-    )
-
-
-def model_display_name(models: Sequence[ModelMetadata], slug: str) -> str:
-    return next(
-        (model["display_name"] for model in models if model["slug"] == slug),
-        slug,
-    )
-
-
-def restore_chatgpt_model(
-    transcript: list[TranscriptEntry], models: Sequence[ModelMetadata]
-) -> ModelPreference:
-    preference: ModelPreference | None = get_chatgpt_model_preference(
-        transcript, models
-    )
-    if preference is None:
-        selected_model = choose_chatgpt_model(models)
-        preference = {"provider": "chatgpt", "model": selected_model}
-        save_model_preference(preference["provider"], preference["model"])
-    return preference
-
-
-def get_chatgpt_model_preference(
-    transcript: list[TranscriptEntry], models: Sequence[ModelMetadata]
-) -> ModelPreference | None:
-    preference = load_model_preference()
-    if preference is None or preference["provider"] != "chatgpt":
-        return None
-
-    if any(model["slug"] == preference["model"] for model in models):
-        return preference
-
-    transcript.append(
-        {
-            "role": "notice",
-            "content": Text(
-                "Current model is now unavailable. Please choose another model.",
-                style="yellow",
-            ),
-        }
-    )
-    return None
+from vin.types.settings import Settings, SettingsChange
+from vin.types.transcript import AssistantEntry, Subagent, TranscriptEntry
 
 
 class VinApp:
@@ -246,7 +84,7 @@ class VinApp:
         self.tool_status: (
             tuple[str, Literal["running", "finished", "failed"]] | None
         ) = None
-        self._credential_refresh: asyncio.Task[Credentials] | None = None
+        self.credential_refresh: asyncio.Task[Credentials] | None = None
         self.project_dir: Path = LAUNCH_DIR
         self.session_record: SessionRecord | None = None
         self.saved_session_record: SessionRecord | None = None
@@ -265,123 +103,25 @@ class VinApp:
         self.search_key: str | None = None
 
     async def ask_secret(self, message: str) -> str:
-        if self.choice_future is not None or self.secret_future is not None:
-            raise RuntimeError("A choice is already open")
-        buffer = Buffer(multiline=False)
-        field = Window(
-            BufferControl(buffer, input_processors=[MaskKey(), BeforeInput(" › ")]),
-            height=1,
-        )
-        self.choice_menu = HSplit(
-            [
-                Window(FormattedTextControl(f" {message}"), height=1, style="bold"),
-                field,
-                Window(
-                    FormattedTextControl(" Enter to confirm"),
-                    height=1,
-                    style="class:placeholder",
-                ),
-            ]
-        )
-        self.secret_future = asyncio.get_running_loop().create_future()
-        try:
-            self.session.layout.focus(field)
-            self.app.invalidate()
-            return await self.secret_future
-        finally:
-            self.secret_future = None
-            self.choice_menu = None
-            self.session.layout.focus(self.input_window)
-            self.app.invalidate()
+        return await menus.ask_secret(self, message)
 
     async def ask_search_key(self) -> str | None:
-        try:
-            key = await self.ask_secret("Paste your Tavily API key")
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
-            return None
-        was_loading = self.loading_model
-        self.auth_status = "Checking Tavily key…"
-        self.loading_model = True
-        self.app.invalidate()
-        try:
-            return await asyncio.to_thread(check_search_key, key)
-        finally:
-            self.auth_status = None
-            self.loading_model = was_loading
-            self.app.invalidate()
+        return await settings_menu.ask_search_key(self)
 
     def update_settings(self, **changes: Unpack[SettingsChange]) -> Settings:
-        updated: Settings = {**self.settings, **changes}
-        save_settings(updated)
-        self.settings = updated
-        return updated
+        return settings_menu.update_settings(self, **changes)
 
     def search_on(self) -> bool:
-        return self.settings["search"] and self.search_key is not None
+        return settings_menu.search_on(self)
 
     async def toggle_search(self) -> str | None:
-        if self.search_key is None:
-            key = await self.ask_search_key()
-            if key is None:
-                return None
-            save_search_key(key)
-            self.search_key = key
-            updated = self.update_settings(search=True)
-        else:
-            updated = self.update_settings(search=not self.settings["search"])
-        return f"Web search {'on' if updated['search'] else 'off'}"
+        return await settings_menu.toggle_search(self)
 
     async def change_search_key(self) -> str | None:
-        if self.search_key is None:
-            return None
-        try:
-            choice = await self.choose_inline(
-                "Web search key", [("replace", "Replace key"), ("remove", "Remove key")]
-            )
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
-            return None
-        if choice == "remove":
-            delete_search_key()
-            self.search_key = None
-            _ = self.update_settings(search=False)
-            return "Web search key removed · web search off"
-        key = await self.ask_search_key()
-        if key is None:
-            return None
-        save_search_key(key)
-        self.search_key = key
-        return f"Web search key replaced · {mask_key(key)}"
+        return await settings_menu.change_search_key(self)
 
     async def sign_in_openrouter(self) -> None:
-        try:
-            key = await self.ask_secret("Paste your OpenRouter API key")
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
-            return
-        account = await asyncio.to_thread(check_openrouter_key, key)
-        save_openrouter_account(account)
-        self.openrouter = account
-        if self.selected_provider is None:
-            self.selected_provider = "openrouter"
-        self.transcript.append(
-            {
-                "role": "notice",
-                "content": f"Signed in to OpenRouter · {mask_key(account['key'])}.",
-            }
-        )
-        self.set_models("openrouter", load_openrouter_whitelist())
-        if not any(model["provider"] == "openrouter" for model in self.models):
-            added = await self.add_openrouter_model("")
-            if added:
-                self.transcript.append({"role": "notice", "content": added})
-        chosen = self.auto_select_model()
-        if chosen:
-            self.transcript.append({"role": "notice", "content": chosen})
+        return await accounts.sign_in_openrouter(self)
 
     def panel_agents(self) -> list[Subagent]:
         return self.subagents[self.panel_start :]
@@ -416,33 +156,7 @@ class VinApp:
         return entries
 
     async def prepare_request_credentials(self) -> AccountRecord | None:
-        if not self.credentials or not self.credentials.get("access_token"):
-            return self.credentials
-
-        assert "access_token" in self.credentials
-        if self._credential_refresh is None:
-            original = self.credentials
-
-            async def refresh() -> Credentials:
-                updated = await asyncio.to_thread(refresh_credentials, original)
-                if self.credentials is not original:
-                    raise RuntimeError("ChatGPT session changed during token refresh.")
-                self.credentials = updated
-                return updated
-
-            task = asyncio.create_task(refresh())
-            self._credential_refresh = task
-
-            def finish(done: asyncio.Task[Credentials]) -> None:
-                # A cancelled waiter must not cancel a rotating-token exchange.
-                if not done.cancelled():
-                    done.exception()
-                if self._credential_refresh is done:
-                    self._credential_refresh = None
-
-            task.add_done_callback(finish)
-
-        return await asyncio.shield(self._credential_refresh)
+        return await accounts.prepare_request_credentials(self)
 
     async def choose_inline(
         self,
@@ -450,70 +164,10 @@ class VinApp:
         options: Sequence[tuple[str, str]],
         default: str | None = None,
     ) -> str:
-        if self.choice_future is not None:
-            raise RuntimeError("A choice is already open")
-
-        self.choices, self.choice_menu = create_choice_menu(message, options, default)
-        self.choice_future = asyncio.get_running_loop().create_future()
-
-        try:
-            self.session.layout.focus(self.choices)
-            self.session.app.invalidate()
-            selected = await self.choice_future
-            assert selected is not None
-            return selected
-        finally:
-            self.choices = None
-            self.choice_menu = None
-            self.choice_future = None
-            self.session.layout.focus(self.input_window)
-            self.session.app.invalidate()
+        return await menus.choose_inline(self, message, options, default)
 
     async def show_panel(self, content: RenderableType) -> None:
-        if self.choice_future is not None:
-            raise RuntimeError("A panel is already open")
-
-        self.choices = None
-        self.choice_menu = Window(
-            FormattedTextControl(
-                lambda: render_transcript(
-                    [
-                        {
-                            "role": "notice",
-                            "content": Padding(
-                                content,
-                                (
-                                    0,
-                                    0,
-                                    0,
-                                    2,
-                                ),
-                            ),
-                        }
-                    ],
-                    self.app.output.get_size().columns,
-                    self.app.output.get_size().rows,
-                ),
-                focusable=True,
-                show_cursor=False,
-            ),
-            wrap_lines=True,
-            dont_extend_height=True,
-        )
-        self.choice_future = asyncio.get_running_loop().create_future()
-
-        try:
-            self.session.layout.focus(self.choice_menu)
-            self.app.invalidate()
-            await self.choice_future
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
-        finally:
-            self.choice_menu = None
-            self.choice_future = None
-            self.session.layout.focus(self.input_window)
-            self.app.invalidate()
+        return await menus.show_panel(self, content)
 
     def accept_input(self, buffer: Buffer) -> bool:
         text = buffer.text
@@ -538,302 +192,7 @@ class VinApp:
     async def stream_reply(
         self, text: str, *, compact_only: bool = False
     ) -> Literal["error", "rate_limit"] | None:
-        events = ReplyEvents()
-        cancel_event = Event()
-        entry: AssistantEntry = {"role": "assistant", "content": "", "streaming": True}
-        request = [message.copy() for message in self.messages]
-        if not compact_only:
-            request.append({"role": "user", "content": text})
-        self.reply_entry = entry
-        self.request_started_at = monotonic()
-        self.last_request_duration = None
-        completed = False
-        text_dirty = False
-        tool_entry: ToolEntry | None = None
-        subagent: Subagent | None = None
-        self.tool_status = None
-
-        if not compact_only:
-            self.panel_start = len(self.subagents)
-            self.panel_index = None
-
-        try:
-            if compact_only and not request:
-                self.transcript.append(
-                    {"role": "notice", "content": "No conversation context to compact."}
-                )
-                completed = True
-                return
-            credentials: AccountRecord | OpenRouterAccount | None
-            if self.selected_provider == "openrouter":
-                credentials = self.openrouter
-            else:
-                try:
-                    credentials = await self.prepare_request_credentials()
-                except Exception as error:
-                    message = "Could not refresh ChatGPT sign-in. Please try again."
-                    if isinstance(error, TokenExchangeError) and error.requires_login:
-                        message = (
-                            "ChatGPT sign-in has expired. Sign in again with /login."
-                        )
-                    self.transcript.append(
-                        {"role": "notice", "content": Text(message, style="red")}
-                    )
-                    return "error"
-
-            compact_threshold: int | None = None
-            for model in self.models:
-                if model["slug"] == self.selected_model:
-                    window = model.get("context_window")
-                    if window is not None:
-                        compact_threshold = window * 4 // 5
-                    break
-
-            if (
-                compact_threshold is None
-                and self.selected_model is not None
-                and not compact_only
-            ):
-                notice = (
-                    "Automatic compaction is off because this model's "
-                    "context limit is unknown."
-                )
-                if not any(
-                    row["role"] == "notice" and row["content"] == notice
-                    for row in self.transcript
-                ):
-                    self.transcript.append({"role": "notice", "content": notice})
-
-            options: ReplyOptions = {}
-            if compact_threshold is not None:
-                options["compact_threshold"] = compact_threshold
-            if compact_only:
-                options["compact_only"] = True
-
-            if not compact_only:
-                options["subagents"] = self.settings["subagents"]
-                options["subagent_budget"] = self.settings["subagent_budget"]
-                options["search"] = self.search_on()
-                options["fetch"] = self.settings["fetch"]
-
-            Thread(
-                target=(
-                    stream_openrouter_response
-                    if self.selected_provider == "openrouter"
-                    else stream_chatgpt_response
-                ),
-                args=(
-                    (credentials or {}).copy(),
-                    self.selected_model,
-                    request,
-                    events,
-                    cancel_event,
-                ),
-                kwargs=options,
-                daemon=True,
-            ).start()
-
-            while True:
-                try:
-                    event = events.get_nowait()
-                    kind = event[0]
-                except Empty:
-                    if text_dirty and self.checkpoint_session():
-                        text_dirty = False
-                    await asyncio.sleep(0.03)
-                    continue
-
-                if event[0] == "text":
-                    if not entry["content"]:
-                        self.transcript.append(entry)
-                    entry["content"] += event[1]
-                    text_dirty = True
-                elif event[0] == "usage":
-                    self.last_usage = event[1].copy()
-                elif event[0] == "tool_diff":
-                    if tool_entry is not None and tool_entry["name"] == "edit":
-                        tool_entry["diff"] = event[1]
-                elif (
-                    event[0] == "tool_started"
-                    or event[0] == "tool_finished"
-                    or event[0] == "tool_failed"
-                ):
-                    value = event[1]
-                    name = value["name"] if isinstance(value, dict) else value
-                    detail = value.get("detail", "") if isinstance(value, dict) else ""
-                    state: Literal["running", "finished", "failed"] = (
-                        "running"
-                        if kind == "tool_started"
-                        else "finished" if kind == "tool_finished" else "failed"
-                    )
-                    self.tool_status = (name, state)
-                    if kind == "tool_started":
-                        entry["intermediate"] = True
-                        entry["streaming"] = False
-                        entry = {"role": "assistant", "content": "", "streaming": True}
-                        self.reply_entry = entry
-                        label = f"{name} {detail}" if detail else name
-                        tool_entry = {
-                            "role": "tool",
-                            "name": name,
-                            "detail": detail,
-                            "label": label,
-                            "status": "running",
-                            "content": Text(f"● {label} · running", style="dim"),
-                        }
-                        self.transcript.append(tool_entry)
-                        if isinstance(value, dict) and "task_id" in value:
-                            subagent = {
-                                "id": value["task_id"],
-                                "description": detail,
-                                "status": "running",
-                                "started_at": monotonic(),
-                                "duration": None,
-                                "tokens": 0,
-                                "transcript": [
-                                    {"role": "user", "content": value.get("prompt", "")}
-                                ],
-                            }
-                            self.subagents.append(subagent)
-                    elif tool_entry is not None:
-                        assert "label" in tool_entry
-                        tool_entry["status"] = state
-                        tool_entry["content"] = Text(
-                            f"● {tool_entry['label']} · {state}",
-                            style="red" if kind == "tool_failed" else "dim",
-                        )
-                        tool_entry = None
-                        if subagent is not None:
-                            finish_subagent(
-                                subagent,
-                                "failed" if kind == "tool_failed" else "finished",
-                            )
-                            subagent = None
-                elif event[0] == "subagent":
-                    target = next(
-                        (
-                            item
-                            for item in self.subagents
-                            if item["id"] == event[1]["task_id"]
-                        ),
-                        None,
-                    )
-                    if target is not None:
-                        apply_subagent_event(target, event[1]["event"])
-                elif event[0] == "complete":
-                    value = event[1]
-                    entry["streaming"] = False
-                    if value is None and compact_only:
-                        self.transcript.append(
-                            {"role": "notice", "content": "Nothing to compact yet."}
-                        )
-                    elif value is None:
-                        self.messages.extend(
-                            [
-                                {"role": "user", "content": text},
-                                {"role": "assistant", "content": entry["content"]},
-                            ]
-                        )
-                    else:
-                        newly_compacted = (
-                            bool(value)
-                            and is_summary(value[0])
-                            and value[0] not in self.messages
-                        )
-                        self.messages[:] = value
-                        if newly_compacted:
-                            self.transcript.append(
-                                {
-                                    "role": "notice",
-                                    "content": "Conversation compacted.",
-                                }
-                            )
-                    completed = True
-                    return
-                elif event[0] == "error" or event[0] == "rate_limit":
-                    self.transcript.append(
-                        {"role": "notice", "content": Text(event[1], style="red")}
-                    )
-                    return event[0]
-
-                if kind in (
-                    "tool_started",
-                    "tool_finished",
-                    "tool_failed",
-                    "tool_diff",
-                ):
-                    if self.active_turn is not None:
-                        self.active_turn["tools_used"] = True
-                    if self.checkpoint_session(force=True):
-                        text_dirty = False
-                elif kind in ("text", "subagent"):
-                    if self.checkpoint_session():
-                        text_dirty = False
-
-                self.session.app.invalidate()
-                await asyncio.sleep(0)
-        finally:
-            cancel_event.set()
-            if not completed and tool_entry is not None:
-                assert "label" in tool_entry
-                interrupted = _task_is_cancelling()
-                interrupted_state: Literal["interrupted", "failed"] = (
-                    "interrupted" if interrupted else "failed"
-                )
-                tool_entry["status"] = interrupted_state
-                tool_entry["content"] = Text(
-                    f"● {tool_entry['label']} · {interrupted_state}",
-                    style="yellow" if interrupted else "red",
-                )
-                if subagent is not None:
-                    finish_subagent(subagent, interrupted_state)
-            if not completed and events.tools_used.is_set():
-                self.messages[:] = close_open_calls(list(request)) + [
-                    {
-                        "role": "assistant",
-                        "content": "Turn interrupted after tool use. Changes may already exist; read relevant files before retrying.",
-                    }
-                ]
-            if self.pending_reply is asyncio.current_task():
-                if (
-                    not completed
-                    and self.tool_status is not None
-                    and self.tool_status[1] == "running"
-                ):
-                    self.tool_status = (self.tool_status[0], "failed")
-                assert self.request_started_at is not None
-                self.last_request_duration = monotonic() - self.request_started_at
-                if completed:
-                    if not compact_only:
-                        finished_at = datetime.now().astimezone().strftime("%I:%M %p")
-                        self.transcript.append(
-                            {
-                                "role": "notice",
-                                "content": Text(
-                                    f"* Worked for {format_duration(self.last_request_duration)}"
-                                    f" · done {finished_at}",
-                                    style="dim",
-                                ),
-                            }
-                        )
-                else:
-                    interrupted = _task_is_cancelling()
-                    label = "Interrupted" if interrupted else "Failed"
-                    self.transcript.append(
-                        {
-                            "role": "notice",
-                            "content": Text(
-                                f"{label} after {format_duration(self.last_request_duration)}",
-                                style="yellow" if interrupted else "red",
-                            ),
-                        }
-                    )
-                self.active_turn = None
-                self.checkpoint_session(force=True)
-                self.request_started_at = None
-                self.pending_reply = None
-                self.reply_entry = None
-            self.session.app.invalidate()
+        return await turns.stream_reply(self, text, compact_only=compact_only)
 
     async def resume_conversation(self, query: str | None = None) -> str | None:
         return await conversations.resume_conversation(self, query)
@@ -844,36 +203,16 @@ class VinApp:
     async def wait_for_models(
         self, load: Coroutine[object, object, list[ModelMetadata]]
     ) -> list[ModelMetadata] | None:
-        self.loading_model = True
-        task = asyncio.create_task(load)
-        self.pending_model_load = task
-        self.app.invalidate()
-        try:
-            return await task
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
-            return None
-        finally:
-            self.pending_model_load = None
-            self.loading_model = False
-            self.app.invalidate()
+        return await model_menu.wait_for_models(self, load)
 
     def select_model(self, model: ModelMetadata) -> str:
-        save_model_preference(model["provider"], model["slug"])
-        self.selected_provider = model["provider"]
-        self.selected_model = model["slug"]
-        self.last_usage = None
-        return f"Model: {PROVIDER_LABELS[model['provider']]} · {model['display_name']}"
+        return model_menu.select_model(self, model)
 
     def save_whitelist(self, models: list[ModelMetadata]) -> None:
-        save_openrouter_whitelist(models)
-        self.set_models("openrouter", models)
+        return model_menu.save_whitelist(self, models)
 
     def auto_select_model(self) -> str | None:
-        if self.selected_model is None and len(self.models) == 1:
-            return self.select_model(self.models[0])
-        return None
+        return model_menu.auto_select_model(self)
 
     async def pick_models(
         self,
@@ -885,225 +224,27 @@ class VinApp:
         current: tuple[str, str] | None = None,
         search: str = "",
     ) -> list[ModelMetadata] | None:
-        if self.choice_future is not None:
-            raise RuntimeError("A choice is already open")
-        picker = ModelPicker(
-            title, models, multi=multi, action=action, current=current, search=search
+        return await model_menu.pick_models(
+            self, title, models, multi=multi, action=action, current=current, search=search
         )
-        self.picker = picker
-        self.choice_menu = picker.container
-        self.choice_future = asyncio.get_running_loop().create_future()
-        try:
-            self.session.layout.focus(picker.search_window)
-            self.app.invalidate()
-            await self.choice_future
-            return picker.chosen()
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
-            return None
-        finally:
-            self.picker = None
-            self.choice_menu = None
-            self.choice_future = None
-            self.session.layout.focus(self.input_window)
-            self.app.invalidate()
 
     async def change_model(self) -> str | None:
-        chatgpt = bool(self.credentials and self.credentials.get("access_token"))
-        if not chatgpt and self.openrouter is None:
-            return "Sign in with /login before choosing a model."
-        if chatgpt and not any(model["provider"] == "chatgpt" for model in self.models):
-            models = await self.wait_for_models(self.discover_chatgpt_models())
-            if models is None:
-                return None
-            self.set_models("chatgpt", models)
-        if not self.models:
-            return "No models yet. Use /model add to add an OpenRouter model."
-        picked = await self.pick_models(
-            "Choose a model",
-            self.models,
-            multi=False,
-            action="choose",
-            current=(self.selected_provider or "", self.selected_model or ""),
-        )
-        if not picked:
-            return None
-        chosen = picked[0]
-        if (
-            chosen["provider"] == self.selected_provider
-            and chosen["slug"] == self.selected_model
-        ):
-            return None
-        return self.select_model(chosen)
+        return await model_menu.change_model(self)
 
     async def add_openrouter_model(self, query: str) -> str | None:
-        if self.openrouter is None:
-            return "Sign in to OpenRouter with /login before adding a model."
-        catalog = await self.wait_for_models(asyncio.to_thread(list_openrouter_models))
-        if catalog is None:
-            return None
-        whitelist = [
-            model for model in self.models if model["provider"] == "openrouter"
-        ]
-        fresh = {model["slug"]: model for model in catalog}
-        refreshed = [fresh.get(model["slug"], model) for model in whitelist]
-        if refreshed != whitelist:
-            self.save_whitelist(refreshed)
-            whitelist = refreshed
-        added = {model["slug"] for model in whitelist}
-        matches = [model for model in catalog if model["slug"] not in added]
-        if not matches:
-            return "Every OpenRouter model with tool support is already added."
-        picked = await self.pick_models(
-            "Add OpenRouter models", matches, multi=True, action="add", search=query
-        )
-        if not picked:
-            return None
-        self.save_whitelist(whitelist + picked)
-        message = f"Added OpenRouter · {', '.join(m['display_name'] for m in picked)}."
-        selected = self.auto_select_model()
-        return (
-            f"{message} {selected}" if selected else f"{message} Use /model to switch."
-        )
+        return await model_menu.add_openrouter_model(self, query)
 
     async def remove_openrouter_model(self) -> str | None:
-        whitelist = [
-            model for model in self.models if model["provider"] == "openrouter"
-        ]
-        if not whitelist:
-            return "No OpenRouter models to remove."
-        picked = await self.pick_models(
-            "Remove OpenRouter models", whitelist, multi=True, action="remove"
-        )
-        if not picked:
-            return None
-        removed = {m["slug"] for m in picked}
-        self.save_whitelist([m for m in whitelist if m["slug"] not in removed])
-        message = (
-            f"Removed OpenRouter · {', '.join(m['display_name'] for m in picked)}."
-        )
-        if self.selected_provider == "openrouter" and self.selected_model in removed:
-            self.selected_model = None
-            self.last_usage = None
-            outcome = self.auto_select_model()
-            if not outcome and self.models:
-                outcome = await self.change_model()
-            if outcome:
-                return f"{message} {outcome}"
-        return message
+        return await model_menu.remove_openrouter_model(self)
 
     async def run_auth_command(self, text: str) -> None:
-        self.loading_model = True
-        task = asyncio.create_task(
-            self.initialize_session(sign_in=True)
-            if text == "/login"
-            else (
-                self.sign_out_openrouter()
-                if self.selected_provider == "openrouter"
-                else self.sign_out()
-            )
-        )
-        self.pending_auth = task
-        self.app.invalidate()
-
-        try:
-            await task
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
-        finally:
-            self.pending_auth = None
-            self.auth_status = None
-            self.loading_model = False
-            self.app.invalidate()
+        return await accounts.run_auth_command(self, text)
 
     async def sign_out(self, *, announce: bool = True) -> None:
-        credentials: AccountRecord | None = None
-        notices: list[str] = []
-        self.auth_status = "Signing out…"
-        self.app.invalidate()
-
-        async def finish_sign_out() -> Registration | None:
-            nonlocal credentials
-            if self._credential_refresh is not None:
-                try:
-                    await asyncio.shield(self._credential_refresh)
-                except Exception:
-                    pass
-            credentials = (
-                self.credentials.copy() if self.credentials is not None else None
-            )
-            return await asyncio.to_thread(
-                logout_chatgpt,
-                credentials,
-                notify=notices.append,
-            )
-
-        task = asyncio.create_task(finish_sign_out())
-        cancelled = False
-        try:
-            try:
-                registration = await asyncio.shield(task)
-            except asyncio.CancelledError:
-                cancelled = True
-                self.auth_status = "Finishing sign-out…"
-                self.app.invalidate()
-                registration = await asyncio.shield(task)
-            self.credentials = registration
-        except RuntimeError, OSError, ValueError:
-            if credentials is not None and not credentials.get("access_token"):
-                self.credentials = credentials
-            raise
-        finally:
-            if not self.credentials or not self.credentials.get("access_token"):
-                self.set_models("chatgpt", [])
-                if self.selected_provider != "openrouter":
-                    self.selected_provider = (
-                        "openrouter" if self.openrouter is not None else None
-                    )
-                    self.selected_model = None
-                    self.last_usage = None
-            self.auth_status = None
-            self.app.invalidate()
-
-        for message in notices:
-            self.transcript.append(
-                {
-                    "role": "notice",
-                    "content": Text(message),
-                }
-            )
-
-        if announce:
-            self.transcript.append(
-                {
-                    "role": "notice",
-                    "content": "Signed out of Vin.",
-                }
-            )
-
-        if cancelled:
-            raise asyncio.CancelledError
+        return await accounts.sign_out(self, announce=announce)
 
     async def sign_out_openrouter(self, *, announce: bool = True) -> None:
-        delete_openrouter_account()
-        self.openrouter = None
-        self.set_models("openrouter", [])
-        if self.selected_provider == "openrouter":
-            self.selected_model = None
-            self.last_usage = None
-            self.selected_provider = (
-                "chatgpt"
-                if self.credentials and self.credentials.get("access_token")
-                else None
-            )
-        if announce:
-            self.transcript.append(
-                {"role": "notice", "content": "Signed out of OpenRouter."}
-            )
-        if self.selected_provider == "chatgpt":
-            await self.load_initial_model()
+        return await accounts.sign_out_openrouter(self, announce=announce)
 
     async def chat_loop(self) -> str:
 
@@ -1115,7 +256,7 @@ class VinApp:
                 try:
                     await self.initialize_session()
                 except asyncio.CancelledError:
-                    if _task_is_cancelling():
+                    if task_is_cancelling():
                         raise
                     self.app.exit(result="/quit")
                     return
@@ -1222,7 +363,7 @@ class VinApp:
                                 if result == "rate_limit":
                                     self.queue_paused = True
                             except asyncio.CancelledError:
-                                if _task_is_cancelling():
+                                if task_is_cancelling():
                                     raise
                         else:
                             content = self.handle_command(text)
@@ -1256,7 +397,7 @@ class VinApp:
                         self.queue_paused = True
                         self.app.invalidate()
                 except asyncio.CancelledError:
-                    if _task_is_cancelling():
+                    if task_is_cancelling():
                         raise
                     self.active_turn = None
                     self.checkpoint_session(force=True)
@@ -1335,39 +476,13 @@ class VinApp:
             return Text(notice)
 
     async def discover_chatgpt_models(self) -> list[ModelMetadata]:
-        credentials = await self.prepare_request_credentials()
-
-        models = await asyncio.to_thread(list_chatgpt_models, credentials)
-
-        save_cached_chatgpt_models(credentials, models)
-        return models
+        return await model_menu.discover_chatgpt_models(self)
 
     async def load_initial_model(self) -> None:
-        models = await self.discover_chatgpt_models()
-        provider_name = PROVIDER_LABELS["chatgpt"]
-        if not models:
-            raise RuntimeError(
-                f"No {provider_name} models are available for this account."
-            )
-
-        preference: ModelPreference | None = get_chatgpt_model_preference(
-            self.transcript, models
-        )
-        if preference is None:
-            selected_model = await self.choose_inline(
-                f"Choose a {provider_name} model",
-                [(model["slug"], model["display_name"]) for model in models],
-            )
-            preference = {"provider": "chatgpt", "model": selected_model}
-            save_model_preference(preference["provider"], preference["model"])
-        self.set_models("chatgpt", models)
-        self.selected_provider = preference["provider"]
-        self.selected_model = preference["model"]
+        return await model_menu.load_initial_model(self)
 
     def set_models(self, provider: Provider, models: list[ModelMetadata]) -> None:
-        self.models = [
-            model for model in self.models if model["provider"] != provider
-        ] + models
+        return model_menu.set_models(self, provider, models)
 
     async def initialize_session(self, *, sign_in: bool = False) -> None:
         if not sign_in:
@@ -1456,26 +571,7 @@ class VinApp:
         await self.load_initial_model()
 
     def model_indicator_text(self) -> str:
-        if monotonic() < self.exit_armed_until:
-            return " Press again to exit"
-        subagent = self.viewed_subagent()
-        if subagent is not None:
-            return (
-                f" Viewing task · {subagent['description']} · read-only · Esc to return"
-            )
-        if self.selected_model:
-            assert self.selected_provider is not None
-            return (
-                f" {PROVIDER_LABELS[self.selected_provider]} · "
-                + model_display_name(self.models, self.selected_model)
-            )
-        if self.selected_provider == "openrouter":
-            return " OpenRouter · No model selected"
-        return (
-            " No model selected · /login"
-            if self.credentials and self.credentials.get("access_token")
-            else " Not signed in · /login"
-        )
+        return model_menu.model_indicator_text(self)
 
     def run(self) -> None:
         self.header = Markdown(
@@ -1493,87 +589,16 @@ class VinApp:
         self.run_conversation()
 
     async def toggle_fetch(self) -> str:
-        updated = self.update_settings(fetch=not self.settings["fetch"])
-        return f"Web fetch {'on' if updated['fetch'] else 'off'}"
+        return await settings_menu.toggle_fetch(self)
 
     async def change_subagent_settings(self) -> str | None:
-        settings = self.settings
-        rows: list[tuple[str, str]] = [
-            (
-                "enabled",
-                setting_row("Subagents", "on" if settings["subagents"] else "off"),
-            ),
-            (
-                "budget",
-                setting_row("Request limit", f"{settings['subagent_budget']} ›"),
-            ),
-        ]
-        try:
-            choice = await self.choose_inline("Subagents", rows)
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
-            return None
-        if choice == "enabled":
-            updated = self.update_settings(subagents=not settings["subagents"])
-        else:
-            try:
-                value = await self.choose_inline(
-                    "Subagent request limit",
-                    [(str(number), str(number)) for number in range(1, 33)],
-                    default=str(settings["subagent_budget"]),
-                )
-            except asyncio.CancelledError:
-                if _task_is_cancelling():
-                    raise
-                return None
-
-            updated = self.update_settings(subagent_budget=int(value))
-        return f"Subagents {'on' if updated['subagents'] else 'off'} · request limit {updated['subagent_budget']}"
+        return await settings_menu.change_subagent_settings(self)
 
     async def change_web_search_settings(self) -> str | None:
-        rows: list[tuple[str, str]] = [
-            ("enabled", setting_row("Web search", "on" if self.search_on() else "off")),
-        ]
-        if self.search_key is not None:
-            rows.append(("key", setting_row("Key", f"{mask_key(self.search_key)} ›")))
-        try:
-            choice = await self.choose_inline("Web search", rows)
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
-            return None
-        if choice == "key":
-            return await self.change_search_key()
-        return await self.toggle_search()
+        return await settings_menu.change_web_search_settings(self)
 
     async def change_settings(self) -> str | None:
-        try:
-            choice = await self.choose_inline(
-                "Settings",
-                [
-                    ("subagents", setting_row("Subagents", "›")),
-                    ("search", setting_row("Web search", "›")),
-                    (
-                        "fetch",
-                        setting_row(
-                            "Web fetch",
-                            "on" if self.settings["fetch"] else "off",
-                        ),
-                    ),
-                ],
-            )
-        except asyncio.CancelledError:
-            if _task_is_cancelling():
-                raise
-            return None
-        if choice == "search":
-            return await self.change_web_search_settings()
-        elif choice == "subagents":
-            return await self.change_subagent_settings()
-        elif choice == "fetch":
-            return await self.toggle_fetch()
-        return None
+        return await settings_menu.change_settings(self)
 
     async def open_task(self) -> str | None:
         if not self.subagents:
@@ -1588,7 +613,7 @@ class VinApp:
                 ],
             )
         except asyncio.CancelledError:
-            if _task_is_cancelling():
+            if task_is_cancelling():
                 raise
             return None
         self.viewed = choice

@@ -16,6 +16,7 @@ from prompt_toolkit.document import Document
 
 from vin.provider import openrouter
 from vin.tui import app as app_module
+from vin.tui import model_menu as model_menu_module
 from vin.tui.app import VinApp
 from vin.tui.completion import SessionCompleter
 from vin.tui.constants import is_command
@@ -169,9 +170,9 @@ class ModelCommandMethodTests(unittest.IsolatedAsyncioTestCase):
         self.vin.selected_provider, self.vin.selected_model = "chatgpt", "gpt"
         self.vin.last_usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
         self.pick = self.enterContext(patch.object(self.vin, "pick_models", AsyncMock()))
-        self.catalog = self.enterContext(patch.object(app_module, "list_openrouter_models", return_value=[CODER, OPUS, GEMINI]))
-        self.save_list = self.enterContext(patch.object(app_module, "save_openrouter_whitelist"))
-        self.save_choice = self.enterContext(patch.object(app_module, "save_model_preference"))
+        self.catalog = self.enterContext(patch.object(model_menu_module, "list_openrouter_models", return_value=[CODER, OPUS, GEMINI]))
+        self.save_list = self.enterContext(patch.object(model_menu_module, "save_openrouter_whitelist"))
+        self.save_choice = self.enterContext(patch.object(model_menu_module, "save_model_preference"))
 
     def assert_selection(self, provider: str | None, model: str | None) -> None:
         self.assertEqual((self.vin.selected_provider, self.vin.selected_model), (provider, model))

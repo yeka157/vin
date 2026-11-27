@@ -23,12 +23,14 @@ from vin.agent import SUMMARY_PREFIX
 from vin.sessions import storage
 from vin.sessions.records import new_session, snapshot_session
 from vin.tui import app, conversations
+from vin.tui import turns as turns_module
 from vin.types.auth import Credentials
 from vin.types.history import History
 from vin.types.models import ModelMetadata
 from vin.types.sessions import SessionRecord
 from vin.provider.events import ReplyEvents
 from vin.types.events import ReplyEvent, TokenUsage
+from tui_application_helpers import patch_app
 from session_typing_helpers import list_value, present, record_value, string_value, text_value
 
 
@@ -400,7 +402,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.object(storage, "SESSIONS_DIR", Path(temporary.name) / "sessions"))
         # Finalization must force a save even within the initial checkpoint window.
         self.clock = self.enterContext(patch.object(conversations, "monotonic", return_value=100.0))
-        self.enterContext(patch.object(app, "monotonic", self.clock))
+        self.enterContext(patch_app(monotonic=self.clock))
         self.prompt = "Review the queue"
         self.prepare_conversation()
 
@@ -436,7 +438,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
             for event in emitted:
                 events.put(event)
 
-        with patch.object(app, "stream_chatgpt_response", side_effect=worker):
+        with patch.object(turns_module, "stream_chatgpt_response", side_effect=worker):
             task = asyncio.create_task(self.owner.stream_reply(self.prompt, compact_only=compact_only))
             self.owner.pending_reply = task
             return await asyncio.wait_for(task, timeout=2)
@@ -522,7 +524,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 stopped.set()
 
-        with patch.object(app, "stream_chatgpt_response", side_effect=worker):
+        with patch.object(turns_module, "stream_chatgpt_response", side_effect=worker):
             task = asyncio.create_task(self.owner.stream_reply(self.prompt, compact_only=True))
             self.owner.pending_reply = task
             try:
@@ -744,7 +746,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 stopped.set()
 
-        with patch.object(app, "stream_chatgpt_response", side_effect=worker):
+        with patch.object(turns_module, "stream_chatgpt_response", side_effect=worker):
             task = asyncio.create_task(self.owner.stream_reply(self.prompt))
             self.owner.pending_reply = task
             try:
@@ -785,7 +787,7 @@ class SessionReplyCheckpointTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 stopped.set()
 
-        self.enterContext(patch.object(app, "stream_chatgpt_response", side_effect=worker))
+        self.enterContext(patch.object(turns_module, "stream_chatgpt_response", side_effect=worker))
         task = asyncio.create_task(self.owner.stream_reply(self.prompt))
         self.owner.pending_reply = task
 

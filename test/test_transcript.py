@@ -26,6 +26,7 @@ from test.tui_typing_helpers import key_event
 from vin.provider.events import ReplyEvents
 from vin.types.events import ReplyEvent, ToolEventKind
 from vin.tui import app as app_module, bindings, layout, transcript
+from vin.tui import turns as turns_module
 from vin.tui.app import VinApp
 from vin.tui.transcript import TranscriptControl, print_assistant_message, render_transcript
 from vin.types.auth import Credentials
@@ -39,7 +40,7 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
         self.owner.session = PromptSession(input=DummyInput(), output=DummyOutput())
         self.owner.session.default_buffer = Buffer(document=Document("next draft", cursor_position=3))
         self.now = 100.0
-        for module in (app_module, bindings, layout, transcript):
+        for module in (app_module, turns_module, bindings, layout, transcript):
             self.enterContext(patch.object(module, "monotonic", side_effect=lambda: self.now, create=True))
 
     async def wait_until(self, predicate: Callable[[], bool]) -> None:
@@ -59,7 +60,7 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 stopped.set()
 
-        self.enterContext(patch.object(app_module, "stream_chatgpt_response", side_effect=worker))
+        self.enterContext(patch.object(turns_module, "stream_chatgpt_response", side_effect=worker))
         self.owner.transcript.append({"role": "user", "content": text})
         task = asyncio.create_task(self.owner.stream_reply(text))
         self.owner.pending_reply = task
@@ -406,7 +407,7 @@ class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
             events.put(("text", "Done"))
             events.put(("complete", None))
 
-        with patch.object(app_module, "stream_chatgpt_response", side_effect=worker):
+        with patch.object(turns_module, "stream_chatgpt_response", side_effect=worker):
             await asyncio.wait_for(self.start(), 2)
         rows = [row for row in self.owner.transcript if row["role"] == "tool"]
         self.assertEqual(len(rows), 2)
@@ -437,7 +438,7 @@ class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
                         events.put(("complete", None))
                     finally:
                         stopped.set()
-                with patch.object(app_module, "stream_chatgpt_response", side_effect=worker):
+                with patch.object(turns_module, "stream_chatgpt_response", side_effect=worker):
                     task = self.start()
                     try:
                         await self.wait_until(lambda: self.owner.tool_status == ("read", "running"))
@@ -484,7 +485,7 @@ class ToolStatusTests(unittest.IsolatedAsyncioTestCase):
                         events.put(("tool_finished", "bash"))
                     finally:
                         stopped.set()
-                with patch.object(app_module, "stream_chatgpt_response", side_effect=worker):
+                with patch.object(turns_module, "stream_chatgpt_response", side_effect=worker):
                     task = self.start()
                     try:
                         await self.wait_until(lambda: self.owner.tool_status == ("bash", "running"))
